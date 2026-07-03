@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,14 +30,25 @@ type Task struct {
 
 // New opens the SQLite database at dbPath and runs migrations.
 func New(dbPath string) (*Store, error) {
+	isMemory := dbPath == ":memory:" || strings.HasPrefix(dbPath, "file::memory:")
+	if !isMemory && !strings.Contains(dbPath, "_pragma=busy_timeout") {
+		if strings.Contains(dbPath, "?") {
+			dbPath += "&_pragma=busy_timeout(5000)"
+		} else {
+			dbPath += "?_pragma=busy_timeout(5000)"
+		}
+	}
+
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	// SQLite in-memory databases are per-connection; limit the pool to one
 	// connection so that all operations share the same database.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	if isMemory {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	}
 	if err := migrate(db); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -323,18 +335,25 @@ func (s *Store) UpdateJob(ctx context.Context, j *Job) error {
 }
 
 // NextPendingJob selects the oldest pending job whose chunk dependencies are
-// satisfied, marks it as running, and returns it. If no job is available it
-// returns nil, nil.
+// satisfied, atomically marks it as running, and returns it. If no job is
+// available it returns nil, nil.
 func (s *Store) NextPendingJob(ctx context.Context) (*Job, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT j.id, j.chunk_id, j.type, j.status, j.error, j.attempts, j.max_attempts, j.created_at, j.started_at, j.completed_at
-		 FROM jobs j
-		 JOIN chunks c ON c.id = j.chunk_id
-		 WHERE j.status = 'pending'
-		   AND j.attempts < j.max_attempts
-		   AND (c.depends_on_chunk_id IS NULL OR c.depends_on_chunk_id = '' OR
-		        (SELECT status FROM chunks WHERE id = c.depends_on_chunk_id) = 'completed')
-		 ORDER BY j.created_at LIMIT 1`)
+		`WITH next AS (
+			SELECT j.id
+			FROM jobs j
+			JOIN chunks c ON c.id = j.chunk_id
+			WHERE j.status = 'pending'
+			  AND j.attempts < j.max_attempts
+			  AND (c.depends_on_chunk_id IS NULL OR c.depends_on_chunk_id = '' OR
+			       (SELECT status FROM chunks WHERE id = c.depends_on_chunk_id) = 'completed')
+			ORDER BY j.created_at LIMIT 1
+		)
+		UPDATE jobs
+		SET status = 'running', started_at = ?
+		WHERE id = (SELECT id FROM next) AND status = 'pending'
+		RETURNING id, chunk_id, type, status, error, attempts, max_attempts, created_at, started_at, completed_at`,
+		time.Now().UTC())
 	j, err := scanJob(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -342,8 +361,7 @@ func (s *Store) NextPendingJob(ctx context.Context) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	j.Status = "running"
-	return j, s.UpdateJob(ctx, j)
+	return j, nil
 }
 
 func scanJob(s scanner) (*Job, error) {

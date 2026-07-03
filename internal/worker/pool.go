@@ -24,26 +24,33 @@ type Pool struct {
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // Start begins polling for jobs and blocks until ctx is cancelled or Stop is
 // called.
 func (p *Pool) Start(ctx context.Context) {
-	if p.NumWorkers <= 0 {
-		p.NumWorkers = 2
+	numWorkers := p.NumWorkers
+	if numWorkers <= 0 {
+		numWorkers = 2
 	}
-	if p.Interval <= 0 {
-		p.Interval = 5 * time.Second
+	interval := p.Interval
+	if interval <= 0 {
+		interval = 5 * time.Second
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 	p.mu.Lock()
 	p.cancel = cancel
+	p.done = done
 	p.mu.Unlock()
 
-	jobs := make(chan string, p.NumWorkers)
+	defer close(done)
+
+	jobs := make(chan string, numWorkers)
 	var wg sync.WaitGroup
-	for i := 0; i < p.NumWorkers; i++ {
+	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -51,7 +58,7 @@ func (p *Pool) Start(ctx context.Context) {
 		}()
 	}
 
-	ticker := time.NewTicker(p.Interval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -83,6 +90,9 @@ func (p *Pool) loop(ctx context.Context, jobs <-chan string) {
 	for id := range jobs {
 		if err := p.Worker.Execute(ctx, id); err != nil {
 			log.Printf("job %s failed: %v", id, err)
+			if err := p.handleError(ctx, id, err); err != nil {
+				log.Printf("job %s error handling failed: %v", id, err)
+			}
 			continue
 		}
 		if err := p.completeJob(ctx, id); err != nil {
@@ -91,8 +101,36 @@ func (p *Pool) loop(ctx context.Context, jobs <-chan string) {
 	}
 }
 
+func (p *Pool) handleError(ctx context.Context, id string, cause error) error {
+	// The pool context may be cancelled while we are persisting state; finish
+	// the update using a context that ignores cancellation.
+	persistCtx := context.WithoutCancel(ctx)
+	j, err := p.Store.GetJob(persistCtx, id)
+	if err != nil {
+		return err
+	}
+	// If the executor already updated the job (e.g. the real Worker sets it to
+	// failed on error), do not override its state.
+	if j.Status != "running" {
+		return nil
+	}
+	j.Attempts++
+	j.Error = cause.Error()
+	if j.Attempts >= j.MaxAttempts {
+		j.Status = "failed"
+		now := time.Now().UTC()
+		j.CompletedAt = &now
+	} else {
+		j.Status = "pending"
+	}
+	return p.Store.UpdateJob(persistCtx, j)
+}
+
 func (p *Pool) completeJob(ctx context.Context, id string) error {
-	j, err := p.Store.GetJob(ctx, id)
+	// The pool context may be cancelled while we are persisting state; finish
+	// the update using a context that ignores cancellation.
+	persistCtx := context.WithoutCancel(ctx)
+	j, err := p.Store.GetJob(persistCtx, id)
 	if err != nil {
 		return err
 	}
@@ -102,14 +140,21 @@ func (p *Pool) completeJob(ctx context.Context, id string) error {
 	j.Status = "completed"
 	now := time.Now().UTC()
 	j.CompletedAt = &now
-	return p.Store.UpdateJob(ctx, j)
+	return p.Store.UpdateJob(persistCtx, j)
 }
 
-// Stop halts the pool. It is safe to call multiple times.
+// Stop halts the pool and blocks until the workers have stopped. It is safe
+// to call multiple times and before Start.
 func (p *Pool) Stop() {
 	p.mu.Lock()
-	if p.cancel != nil {
-		p.cancel()
-	}
+	cancel := p.cancel
+	done := p.done
 	p.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
