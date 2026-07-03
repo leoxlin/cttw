@@ -33,6 +33,10 @@ func New(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	// SQLite in-memory databases are per-connection; limit the pool to one
+	// connection so that all operations share the same database.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if err := migrate(db); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -316,6 +320,30 @@ func (s *Store) UpdateJob(ctx context.Context, j *Job) error {
 		j.CreatedAt, j.StartedAt, j.CompletedAt, j.ID,
 	)
 	return err
+}
+
+// NextPendingJob selects the oldest pending job whose chunk dependencies are
+// satisfied, marks it as running, and returns it. If no job is available it
+// returns nil, nil.
+func (s *Store) NextPendingJob(ctx context.Context) (*Job, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT j.id, j.chunk_id, j.type, j.status, j.error, j.attempts, j.max_attempts, j.created_at, j.started_at, j.completed_at
+		 FROM jobs j
+		 JOIN chunks c ON c.id = j.chunk_id
+		 WHERE j.status = 'pending'
+		   AND j.attempts < j.max_attempts
+		   AND (c.depends_on_chunk_id IS NULL OR c.depends_on_chunk_id = '' OR
+		        (SELECT status FROM chunks WHERE id = c.depends_on_chunk_id) = 'completed')
+		 ORDER BY j.created_at LIMIT 1`)
+	j, err := scanJob(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	j.Status = "running"
+	return j, s.UpdateJob(ctx, j)
 }
 
 func scanJob(s scanner) (*Job, error) {
