@@ -3,3 +3,4 @@
 *.sock
 .DS_Store
 cttw
+.worktrees/
