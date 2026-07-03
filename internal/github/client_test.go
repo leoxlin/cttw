@@ -35,11 +35,11 @@ func TestCreateSubIssue(t *testing.T) {
 			assert.Equal(t, "token gh_token", r.Header.Get("Authorization"))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"number":1,"body":"existing body"}`))
+			w.Write([]byte(`{"number":1,"title":"Parent title","body":"Task tracked by cttw."}`))
 		case "PATCH":
 			assert.Equal(t, "/repos/o/r/issues/1", r.URL.Path)
 			body, _ := io.ReadAll(r.Body)
-			assert.JSONEq(t, `{"title":"","body":"- [ ] #2\n"}`, string(body))
+			assert.JSONEq(t, `{"title":"Parent title","body":"Task tracked by cttw.\n- [ ] #2\n"}`, string(body))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"number":1}`))

@@ -77,7 +77,9 @@ type issueRequest struct {
 }
 
 type issueResponse struct {
-	Number int `json:"number"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
 }
 
 func (c *client) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
@@ -90,10 +92,11 @@ func (c *client) CreateIssue(ctx context.Context, owner, repo, title, body strin
 func (c *client) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
 	// MVP: link via markdown tasklist in parent issue body.
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, parentNumber)
-	if _, err := c.do(ctx, "GET", path, nil, nil); err != nil {
+	var parent issueResponse
+	if _, err := c.do(ctx, "GET", path, nil, &parent); err != nil {
 		return err
 	}
-	body := fmt.Sprintf("- [ ] #%d\n", childNumber)
-	_, err := c.do(ctx, "PATCH", path, issueRequest{Body: body}, nil)
+	parent.Body += fmt.Sprintf("\n- [ ] #%d\n", childNumber)
+	_, err := c.do(ctx, "PATCH", path, issueRequest{Title: parent.Title, Body: parent.Body}, nil)
 	return err
 }
