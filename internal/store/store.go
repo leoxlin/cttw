@@ -364,6 +364,22 @@ func (s *Store) NextPendingJob(ctx context.Context) (*Job, error) {
 	return j, nil
 }
 
+// ResetRunningJobs resets jobs that were running at startup to pending so they
+// can be retried after a crash or unclean shutdown.
+func (s *Store) ResetRunningJobs(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET status='pending' WHERE status='running' AND attempts < max_attempts`)
+	return err
+}
+
+// RevertJobToPending resets a running job back to pending without incrementing
+// attempts. It is used when a job was claimed but could not be dispatched.
+func (s *Store) RevertJobToPending(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET status='pending' WHERE id=? AND status='running'`, id)
+	return err
+}
+
 func scanJob(s scanner) (*Job, error) {
 	j := &Job{}
 	err := s.Scan(&j.ID, &j.ChunkID, &j.Type, &j.Status, &j.Error, &j.Attempts, &j.MaxAttempts,

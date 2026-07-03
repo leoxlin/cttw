@@ -48,6 +48,10 @@ func (p *Pool) Start(ctx context.Context) {
 
 	defer close(done)
 
+	if err := p.Store.ResetRunningJobs(ctx); err != nil {
+		log.Printf("reset running jobs: %v", err)
+	}
+
 	jobs := make(chan string, numWorkers)
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
@@ -78,6 +82,12 @@ func (p *Pool) Start(ctx context.Context) {
 			select {
 			case jobs <- job.ID:
 			case <-ctx.Done():
+				// The job was claimed but never dispatched; revert it so the
+				// next pool start can retry it.
+				persistCtx := context.WithoutCancel(ctx)
+				if err := p.Store.RevertJobToPending(persistCtx, job.ID); err != nil {
+					log.Printf("revert claimed job %s: %v", job.ID, err)
+				}
 				close(jobs)
 				wg.Wait()
 				return
