@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/llin/cttw/internal/api"
@@ -107,6 +108,37 @@ func TestHandleGetTaskNotFound(t *testing.T) {
 	d.handleGetTask(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestHandleCreateTaskEmptyDescription(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	d := &Daemon{Store: s}
+	body, _ := json.Marshal(api.CreateTaskRequest{Description: "   "})
+	req := httptest.NewRequest("POST", "/api/v1/tasks", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	d.handleCreateTask(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandleListTasksEmpty(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	d := &Daemon{Store: s}
+	req := httptest.NewRequest("GET", "/api/v1/tasks", nil)
+	w := httptest.NewRecorder()
+	d.handleListTasks(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "[]", strings.TrimSpace(w.Body.String()))
+	var resp []api.TaskResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Empty(t, resp)
 }
 
 func TestHandleListTasks(t *testing.T) {

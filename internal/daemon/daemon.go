@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/llin/cttw/internal/api"
@@ -32,6 +33,7 @@ type Daemon struct {
 	Name        string
 	Socket      string
 	shutdown    chan struct{}
+	shutdownOnce sync.Once
 }
 
 func Run() error {
@@ -195,7 +197,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	if d.shutdown != nil {
-		close(d.shutdown)
+		d.shutdownOnce.Do(func() { close(d.shutdown) })
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -206,7 +208,7 @@ func (d *Daemon) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var resp []api.TaskResponse
+	resp := make([]api.TaskResponse, 0)
 	for i := range tasks {
 		resp = append(resp, taskToResponse(&tasks[i], nil))
 	}
