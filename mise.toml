@@ -1,0 +1,14 @@
+[tools]
+go = "1.25.0"
+
+[tasks.build]
+description = "Build cttw binary into bin/"
+run = "go build -o bin/cttw ./cmd/cttw"
+
+[tasks.test]
+description = "Run all tests"
+run = "go test ./..."
+
+[tasks.dev]
+description = "Run cttw in development mode"
+run = "go run ./cmd/cttw"

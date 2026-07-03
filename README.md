@@ -30,7 +30,10 @@ You can also point to a custom config file with `CTTW_CONFIG=/path/to/config.tom
 
 ## Development
 
+With [mise](https://mise.jdx.dev):
+
 ```bash
-make build
-make test
+mise install
+mise run build
+mise run test
 ```
