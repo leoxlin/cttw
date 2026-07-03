@@ -75,6 +75,16 @@ func (c *Client) GetTask(id string) (*TaskResponse, error) {
 	return &tr, nil
 }
 
+func (c *Client) Shutdown() error {
+	_, err := c.post("/api/v1/shutdown", nil)
+	return err
+}
+
+func (c *Client) Status() error {
+	_, err := c.get("/api/v1/status")
+	return err
+}
+
 func (c *Client) url(path string) string {
 	if strings.HasPrefix(c.Socket, "unix://") {
 		return "http://unix" + path
