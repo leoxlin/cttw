@@ -9,10 +9,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func Run() error {
-	root := &cobra.Command{
-		Use:   "cttw",
-		Short: "Claudivicus Take The Wheel",
+func tuiCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "tui",
+		Short: "Launch interactive TUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
 			if err != nil {
@@ -23,6 +23,4 @@ func Run() error {
 			return err
 		},
 	}
-	root.AddCommand(daemonCmd(), taskCmd(), tasksCmd(), tuiCmd())
-	return root.Execute()
 }
