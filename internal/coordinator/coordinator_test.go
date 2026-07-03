@@ -15,8 +15,12 @@ func (f *fakeGH) CreateIssue(ctx context.Context, owner, repo, title, body strin
 	f.issueNum++
 	return f.issueNum, nil
 }
-func (f *fakeGH) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error { return nil }
-func (f *fakeGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error { return nil }
+func (f *fakeGH) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
+	return nil
+}
+func (f *fakeGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
+	return nil
+}
 func (f *fakeGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	return 0, nil
 }

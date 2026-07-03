@@ -17,11 +17,15 @@ import (
 
 type fakeGH struct{}
 
-func (f *fakeGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) { return 1, nil }
+func (f *fakeGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
+	return 1, nil
+}
 func (f *fakeGH) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
 	return nil
 }
-func (f *fakeGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error { return nil }
+func (f *fakeGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
+	return nil
+}
 func (f *fakeGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	return 42, nil
 }
@@ -34,7 +38,9 @@ func (f *fakeGHError) CreateIssue(ctx context.Context, owner, repo, title, body 
 func (f *fakeGHError) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
 	return nil
 }
-func (f *fakeGHError) CreateBranch(ctx context.Context, owner, repo, branch, base string) error { return nil }
+func (f *fakeGHError) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
+	return nil
+}
 func (f *fakeGHError) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	return 0, errors.New("create PR failed")
 }

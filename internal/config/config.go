@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -26,10 +27,11 @@ func Load(path string, env map[string]string) (*Config, error) {
 		LLMModel:     "gpt-4o",
 		DaemonSocket: "unix:///tmp/cttw.sock",
 	}
-	if path != "" {
-		if _, err := toml.DecodeFile(path, cfg); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("load config: %w", err)
-		}
+	if path == "" {
+		path = defaultConfigPath()
+	}
+	if _, err := toml.DecodeFile(path, cfg); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("load config: %w", err)
 	}
 	if v := env["REPO"]; v != "" {
 		cfg.Repo = v
@@ -57,6 +59,14 @@ func Load(path string, env map[string]string) (*Config, error) {
 		return nil, fmt.Errorf("repo must be owner/name")
 	}
 	return cfg, nil
+}
+
+func defaultConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "cttw", "config.toml")
 }
 
 func envMap() map[string]string {

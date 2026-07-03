@@ -26,13 +26,13 @@ import (
 )
 
 type Daemon struct {
-	Store       *store.Store
-	Coordinator *coordinator.Coordinator
-	Pool        *worker.Pool
-	Owner       string
-	Name        string
-	Socket      string
-	shutdown    chan struct{}
+	Store        *store.Store
+	Coordinator  *coordinator.Coordinator
+	Pool         *worker.Pool
+	Owner        string
+	Name         string
+	Socket       string
+	shutdown     chan struct{}
 	shutdownOnce sync.Once
 }
 

@@ -22,7 +22,11 @@ repo = "owner/repo"
 github_token = "..."
 llm_api_key = "..."
 llm_model = "gpt-4o"
+llm_base_url = "https://api.openai.com/v1"
+daemon_socket = "unix:///tmp/cttw.sock"
 ```
+
+You can also point to a custom config file with `CTTW_CONFIG=/path/to/config.toml`.
 
 ## Development
 
