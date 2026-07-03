@@ -13,6 +13,8 @@ import (
 type Client interface {
 	CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error)
 	CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error
+	CreateBranch(ctx context.Context, owner, repo, branch, base string) error
+	CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error)
 }
 
 type client struct {
@@ -99,4 +101,43 @@ func (c *client) CreateSubIssue(ctx context.Context, owner, repo string, parentN
 	parent.Body += fmt.Sprintf("\n- [ ] #%d\n", childNumber)
 	_, err := c.do(ctx, "PATCH", path, issueRequest{Title: parent.Title, Body: parent.Body}, nil)
 	return err
+}
+
+type refResponse struct {
+	Object struct {
+		SHA string `json:"sha"`
+	} `json:"object"`
+}
+
+type createRefRequest struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
+}
+
+func (c *client) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
+	var ref refResponse
+	if _, err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", owner, repo, base), nil, &ref); err != nil {
+		return err
+	}
+	_, err := c.do(ctx, "POST", fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo),
+		createRefRequest{Ref: "refs/heads/" + branch, SHA: ref.Object.SHA}, nil)
+	return err
+}
+
+type prRequest struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+	Head  string `json:"head"`
+	Base  string `json:"base"`
+}
+
+type prResponse struct {
+	Number int `json:"number"`
+}
+
+func (c *client) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
+	var out prResponse
+	_, err := c.do(ctx, "POST", fmt.Sprintf("/repos/%s/%s/pulls", owner, repo),
+		prRequest{Title: title, Body: body, Head: head, Base: base}, &out)
+	return out.Number, err
 }

@@ -53,3 +53,30 @@ func TestCreateSubIssue(t *testing.T) {
 	err := c.CreateSubIssue(context.Background(), "o", "r", 1, 2)
 	require.NoError(t, err)
 }
+
+func TestCreateBranch(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/git/ref/heads/main":
+			w.Write([]byte(`{"object":{"sha":"abc123"}}`))
+		case "/repos/o/r/git/refs":
+			w.WriteHeader(http.StatusCreated)
+		}
+	}))
+	defer ts.Close()
+	c := newWithURL("token", ts.URL, ts.Client())
+	require.NoError(t, c.CreateBranch(context.Background(), "o", "r", "feat/x", "main"))
+}
+
+func TestCreatePullRequest(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/repos/o/r/pulls", r.URL.Path)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"number":99}`))
+	}))
+	defer ts.Close()
+	c := newWithURL("token", ts.URL, ts.Client())
+	n, err := c.CreatePullRequest(context.Background(), "o", "r", "title", "body", "feat/x", "main")
+	require.NoError(t, err)
+	assert.Equal(t, 99, n)
+}
