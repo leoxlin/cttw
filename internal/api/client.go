@@ -8,9 +8,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
+
+const defaultRequestTimeout = 30 * time.Second
 
 type Client struct {
 	Socket string
@@ -18,24 +21,25 @@ type Client struct {
 }
 
 func NewClient(socket string) *Client {
-	client := http.DefaultClient
+	transport := &http.Transport{}
 	if strings.HasPrefix(socket, "unix://") {
 		path := strings.TrimPrefix(socket, "unix://")
-		client = &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					var d net.Dialer
-					return d.DialContext(ctx, "unix", path)
-				},
-			},
-			Timeout: 30 * time.Second,
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", path)
 		}
 	}
-	return &Client{Socket: socket, http: client}
+	return &Client{
+		Socket: socket,
+		http:   &http.Client{Transport: transport, Timeout: defaultRequestTimeout},
+	}
 }
 
 func (c *Client) CreateTask(description string) (*TaskResponse, error) {
-	body, _ := json.Marshal(CreateTaskRequest{Description: description})
+	body, err := json.Marshal(CreateTaskRequest{Description: description})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
 	resp, err := c.post("/api/v1/tasks", body)
 	if err != nil {
 		return nil, err
@@ -60,7 +64,7 @@ func (c *Client) ListTasks() ([]TaskResponse, error) {
 }
 
 func (c *Client) GetTask(id string) (*TaskResponse, error) {
-	resp, err := c.get("/api/v1/tasks/" + id)
+	resp, err := c.get("/api/v1/tasks/" + url.PathEscape(id))
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +92,14 @@ func (c *Client) get(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("daemon %d: %s", resp.StatusCode, string(b))
+	}
+	return b, nil
 }
 
 func (c *Client) post(path string, body []byte) ([]byte, error) {
@@ -102,7 +113,10 @@ func (c *Client) post(path string, body []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("daemon %d: %s", resp.StatusCode, string(b))
 	}
