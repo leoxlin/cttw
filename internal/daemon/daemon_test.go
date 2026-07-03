@@ -130,3 +130,36 @@ func TestHandleListTasks(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Len(t, resp, 2)
 }
+
+func TestHandleGetTaskIncludesChunks(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	task, err := s.CreateTask(ctx, "task with chunks", "o", "r")
+	require.NoError(t, err)
+
+	chunk, err := s.CreateChunk(ctx, store.Chunk{
+		TaskID:      task.ID,
+		Title:       "chunk one",
+		Description: "chunk description",
+		SortOrder:   1,
+	})
+	require.NoError(t, err)
+
+	d := &Daemon{Store: s}
+	req := httptest.NewRequest("GET", "/api/v1/tasks/"+task.ID, nil)
+	req.SetPathValue("id", task.ID)
+	w := httptest.NewRecorder()
+	d.handleGetTask(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	var resp api.TaskResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, task.ID, resp.ID)
+	require.Len(t, resp.Chunks, 1)
+	assert.Equal(t, chunk.ID, resp.Chunks[0].ID)
+	assert.Equal(t, "chunk one", resp.Chunks[0].Title)
+}
