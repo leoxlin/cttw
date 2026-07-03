@@ -23,6 +23,11 @@ func (r *Runner) run(args ...string) error {
 	return run(r.Dir, args...)
 }
 
+// Run executes an arbitrary git command in the runner's directory.
+func (r *Runner) Run(args ...string) error {
+	return r.run(args...)
+}
+
 func (r *Runner) runOutput(args ...string) ([]byte, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = r.Dir
