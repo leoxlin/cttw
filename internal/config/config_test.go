@@ -10,62 +10,105 @@ import (
 )
 
 func TestLoad_Defaults(t *testing.T) {
-	cfg, err := Load("", map[string]string{"REPO": "owner/repo"})
-	require.NoError(t, err)
-	assert.Equal(t, "owner/repo", cfg.Repo)
-	assert.Equal(t, "https://api.openai.com/v1", cfg.LLMBaseURL)
-	assert.Equal(t, "gpt-4o", cfg.LLMModel)
-	assert.Equal(t, "unix:///tmp/cttw.sock", cfg.DaemonSocket)
-}
-
-func TestLoad_FromEnv(t *testing.T) {
-	cfg, err := Load("", map[string]string{
-		"GITHUB_TOKEN": "gh_token",
-		"LLM_API_KEY":  "llm_key",
-		"REPO":         "owner/repo",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "gh_token", cfg.GitHubToken)
-	assert.Equal(t, "llm_key", cfg.LLMAPIKey)
-	assert.Equal(t, "owner/repo", cfg.Repo)
-}
-
-func TestLoad_RepoRequired(t *testing.T) {
-	_, err := Load("", map[string]string{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "repo is required")
-}
-
-func TestLoad_RepoFormat(t *testing.T) {
-	cases := []string{"owner", "owner/", "/repo", "owner/repo/extra"}
-	for _, repo := range cases {
-		_, err := Load("", map[string]string{"REPO": repo})
-		require.Error(t, err, "repo: %s", repo)
-		assert.Contains(t, err.Error(), "repo must be owner/name")
-	}
-}
-
-func TestLoad_FromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cttw.toml")
 	content := `
-repo = "file/repo"
-github_token = "file_token"
-llm_base_url = "https://example.com/v1"
-llm_model = "custom-model"
-daemon_socket = "unix:///var/run/cttw.sock"
+[[repos]]
+owner = "llin"
+name = "cttw"
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 
 	cfg, err := Load(path, map[string]string{
-		"REPO":        "env/repo",
-		"LLM_API_KEY": "env_key",
+		"GITHUB_TOKEN": "tok",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "env/repo", cfg.Repo)
-	assert.Equal(t, "file_token", cfg.GitHubToken)
-	assert.Equal(t, "https://example.com/v1", cfg.LLMBaseURL)
-	assert.Equal(t, "env_key", cfg.LLMAPIKey)
-	assert.Equal(t, "custom-model", cfg.LLMModel)
+	assert.Equal(t, "unix:///tmp/cttw.sock", cfg.DaemonSocket)
+	assert.Equal(t, "codex", cfg.Agent.DefaultBackend)
+	require.Len(t, cfg.Repos, 1)
+	assert.Equal(t, "main", cfg.Repos[0].DefaultBranch)
+	assert.Equal(t, "tok", cfg.GitHubToken)
+}
+
+func TestLoad_MultiRepoAndBackend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cttw.toml")
+	content := `
+[[repos]]
+owner = "llin"
+name = "cttw"
+default_branch = "main"
+
+[[repos]]
+owner = "llin"
+name = "other-project"
+
+[agent]
+default_backend = "codex"
+
+[agent.backends.codex]
+type = "local"
+command = "codex-acp"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	cfg, err := Load(path, map[string]string{
+		"GITHUB_TOKEN":  "gh_token",
+		"DAEMON_SOCKET": "unix:///var/run/cttw.sock",
+	})
+	require.NoError(t, err)
+	require.Len(t, cfg.Repos, 2)
+	assert.Equal(t, "llin", cfg.Repos[0].Owner)
+	assert.Equal(t, "cttw", cfg.Repos[0].Name)
+	assert.Equal(t, "main", cfg.Repos[0].DefaultBranch)
+	assert.Equal(t, "other-project", cfg.Repos[1].Name)
+	assert.Equal(t, "main", cfg.Repos[1].DefaultBranch) // default
+	assert.Equal(t, "codex", cfg.Agent.DefaultBackend)
+	assert.Equal(t, "local", cfg.Agent.Backends["codex"].Type)
+	assert.Equal(t, "codex-acp", cfg.Agent.Backends["codex"].Command)
+	assert.Equal(t, "gh_token", cfg.GitHubToken)
 	assert.Equal(t, "unix:///var/run/cttw.sock", cfg.DaemonSocket)
+}
+
+func TestLoad_RepoRequired(t *testing.T) {
+	_, err := Load("", map[string]string{"GITHUB_TOKEN": "tok"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least one repo")
+}
+
+func TestLoad_BackendMustExist(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cttw.toml")
+	content := `
+[[repos]]
+owner = "o"
+name = "r"
+
+[agent]
+default_backend = "missing"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	_, err := Load(path, map[string]string{"GITHUB_TOKEN": "tok"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "backend \"missing\" not configured")
+}
+
+func TestLoad_LocalBackendNeedsCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cttw.toml")
+	content := `
+[[repos]]
+owner = "o"
+name = "r"
+
+[agent]
+default_backend = "codex"
+
+[agent.backends.codex]
+type = "local"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	_, err := Load(path, map[string]string{"GITHUB_TOKEN": "tok"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "command")
 }

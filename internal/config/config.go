@@ -10,12 +10,27 @@ import (
 )
 
 type Config struct {
-	Repo         string `toml:"repo"`
-	GitHubToken  string `toml:"github_token"`
-	LLMBaseURL   string `toml:"llm_base_url"`
-	LLMAPIKey    string `toml:"llm_api_key"`
-	LLMModel     string `toml:"llm_model"`
-	DaemonSocket string `toml:"daemon_socket"`
+	GitHubToken  string       `toml:"github_token"`
+	DaemonSocket string       `toml:"daemon_socket"`
+	Repos        []RepoConfig `toml:"repos"`
+	Agent        AgentConfig  `toml:"agent"`
+}
+
+type RepoConfig struct {
+	Owner         string `toml:"owner"`
+	Name          string `toml:"name"`
+	DefaultBranch string `toml:"default_branch"`
+}
+
+type AgentConfig struct {
+	DefaultBackend string                   `toml:"default_backend"`
+	Backends       map[string]BackendConfig `toml:"backends"`
+}
+
+type BackendConfig struct {
+	Type    string `toml:"type"`
+	Command string `toml:"command"`
+	URL     string `toml:"url"`
 }
 
 func Load(path string, env map[string]string) (*Config, error) {
@@ -23,9 +38,13 @@ func Load(path string, env map[string]string) (*Config, error) {
 		env = envMap()
 	}
 	cfg := &Config{
-		LLMBaseURL:   "https://api.openai.com/v1",
-		LLMModel:     "gpt-4o",
 		DaemonSocket: "unix:///tmp/cttw.sock",
+		Agent: AgentConfig{
+			DefaultBackend: "codex",
+			Backends: map[string]BackendConfig{
+				"codex": {Type: "local", Command: "codex-acp"},
+			},
+		},
 	}
 	if path == "" {
 		path = defaultConfigPath()
@@ -33,32 +52,53 @@ func Load(path string, env map[string]string) (*Config, error) {
 	if _, err := toml.DecodeFile(path, cfg); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
-	if v := env["REPO"]; v != "" {
-		cfg.Repo = v
-	}
 	if v := env["GITHUB_TOKEN"]; v != "" {
 		cfg.GitHubToken = v
-	}
-	if v := env["LLM_BASE_URL"]; v != "" {
-		cfg.LLMBaseURL = v
-	}
-	if v := env["LLM_API_KEY"]; v != "" {
-		cfg.LLMAPIKey = v
-	}
-	if v := env["LLM_MODEL"]; v != "" {
-		cfg.LLMModel = v
 	}
 	if v := env["DAEMON_SOCKET"]; v != "" {
 		cfg.DaemonSocket = v
 	}
-	if cfg.Repo == "" {
-		return nil, fmt.Errorf("repo is required")
-	}
-	parts := strings.Split(cfg.Repo, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return nil, fmt.Errorf("repo must be owner/name")
+	if err := validate(cfg); err != nil {
+		return nil, err
 	}
 	return cfg, nil
+}
+
+func validate(cfg *Config) error {
+	if cfg.GitHubToken == "" {
+		return fmt.Errorf("github_token is required")
+	}
+	if len(cfg.Repos) == 0 {
+		return fmt.Errorf("at least one repo is required")
+	}
+	for i, r := range cfg.Repos {
+		if r.Owner == "" || r.Name == "" {
+			return fmt.Errorf("repo %d must have owner and name", i)
+		}
+		if r.DefaultBranch == "" {
+			cfg.Repos[i].DefaultBranch = "main"
+		}
+	}
+	if cfg.Agent.DefaultBackend == "" {
+		return fmt.Errorf("agent.default_backend is required")
+	}
+	backend, ok := cfg.Agent.Backends[cfg.Agent.DefaultBackend]
+	if !ok {
+		return fmt.Errorf("agent default backend %q not configured", cfg.Agent.DefaultBackend)
+	}
+	switch backend.Type {
+	case "local":
+		if backend.Command == "" {
+			return fmt.Errorf("local backend %q requires command", cfg.Agent.DefaultBackend)
+		}
+	case "remote":
+		if backend.URL == "" {
+			return fmt.Errorf("remote backend %q requires url", cfg.Agent.DefaultBackend)
+		}
+	default:
+		return fmt.Errorf("backend %q has unsupported type %q", cfg.Agent.DefaultBackend, backend.Type)
+	}
+	return nil
 }
 
 func defaultConfigPath() string {

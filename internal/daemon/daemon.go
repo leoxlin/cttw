@@ -41,8 +41,8 @@ func Run() error {
 	if err != nil {
 		return err
 	}
-	parts := strings.Split(cfg.Repo, "/")
-	owner, name := parts[0], parts[1]
+	repo := cfg.Repos[0]
+	owner, name := repo.Owner, repo.Name
 
 	s, err := store.New(dbPath())
 	if err != nil {
@@ -51,7 +51,7 @@ func Run() error {
 	defer s.Close()
 
 	gh := github.New(cfg.GitHubToken, nil)
-	llmClient := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, nil)
+	llmClient := llm.New("https://api.openai.com/v1", "", "gpt-4o", nil)
 
 	d := &Daemon{
 		Store:    s,
@@ -65,7 +65,7 @@ func Run() error {
 	d.Coordinator = coord
 
 	gitRunner := &gitexec.Runner{Dir: repoDir()}
-	w := &worker.Worker{GH: gh, LLM: llmClient, Store: s, Owner: owner, Repo: name, Git: gitRunner}
+	w := &worker.Worker{GH: gh, LLM: llmClient, Store: s, Owner: owner, Repo: name, Git: gitRunner, DefaultBranch: repo.DefaultBranch}
 	d.Pool = &worker.Pool{Worker: w, Store: s}
 	defer d.Pool.Stop()
 
