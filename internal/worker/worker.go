@@ -2,7 +2,11 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -13,12 +17,20 @@ import (
 )
 
 type Worker struct {
-	GH    github.Client
-	Git   *gitexec.Runner
-	LLM   llm.Client
-	Store *store.Store
-	Owner string
-	Repo  string
+	GH            github.Client
+	Git           *gitexec.Runner
+	LLM           llm.Client
+	Store         *store.Store
+	Owner         string
+	Repo          string
+	DefaultBranch string
+}
+
+func (w *Worker) baseBranch() string {
+	if w.DefaultBranch != "" {
+		return w.DefaultBranch
+	}
+	return "main"
 }
 
 func (w *Worker) Execute(ctx context.Context, jobID string) error {
@@ -39,14 +51,14 @@ func (w *Worker) Execute(ctx context.Context, jobID string) error {
 		return err
 	}
 
-	base := "main"
+	base := w.baseBranch()
 	if chunk.DependsOnChunkID != "" {
 		dep, err := w.Store.GetChunk(ctx, chunk.DependsOnChunkID)
 		if err == nil && dep.Branch != "" {
 			base = dep.Branch
 		}
 	}
-	branch := fmt.Sprintf("cttw/%s/%s", chunk.TaskID[:8], slug(chunk.Title))
+	branch := fmt.Sprintf("cttw/%s/%s", shortID(chunk.TaskID), slug(chunk.Title))
 	chunk.Branch = branch
 	chunk.BaseBranch = base
 	chunk.Status = "running"
@@ -64,7 +76,10 @@ func (w *Worker) Execute(ctx context.Context, jobID string) error {
 		if err != nil {
 			return w.fail(ctx, job, chunk, err)
 		}
-		_ = out
+		artifact := filepath.Join(w.Git.Dir, fmt.Sprintf("cttw-chunk-%s.md", shortID(chunk.ID)))
+		if err := os.WriteFile(artifact, []byte(out), 0644); err != nil {
+			return w.fail(ctx, job, chunk, fmt.Errorf("write llm artifact: %w", err))
+		}
 	}
 
 	if err := w.Git.Add("."); err != nil {
@@ -96,16 +111,40 @@ func (w *Worker) Execute(ctx context.Context, jobID string) error {
 	return w.Store.UpdateJob(ctx, job)
 }
 
-func (w *Worker) fail(ctx context.Context, job *store.Job, chunk *store.Chunk, err error) error {
+func (w *Worker) fail(ctx context.Context, job *store.Job, chunk *store.Chunk, cause error) error {
 	job.Status = "failed"
-	job.Error = err.Error()
+	job.Error = cause.Error()
 	chunk.Status = "failed"
-	chunk.Output = err.Error()
-	_ = w.Store.UpdateJob(ctx, job)
-	_ = w.Store.UpdateChunk(ctx, chunk)
-	return err
+	chunk.Output = cause.Error()
+
+	var errs []error
+	if err := w.Store.UpdateJob(ctx, job); err != nil {
+		errs = append(errs, fmt.Errorf("persist failed job: %w", err))
+	}
+	if err := w.Store.UpdateChunk(ctx, chunk); err != nil {
+		errs = append(errs, fmt.Errorf("persist failed chunk: %w", err))
+	}
+	if len(errs) > 0 {
+		return errors.Join(append([]error{cause}, errs...)...)
+	}
+	return cause
 }
 
+var slugInvalid = regexp.MustCompile(`[^a-z0-9_]+`)
+
 func slug(s string) string {
-	return strings.ReplaceAll(strings.ToLower(s), " ", "-")
+	s = strings.ToLower(s)
+	s = slugInvalid.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		return "chunk"
+	}
+	return s
+}
+
+func shortID(id string) string {
+	if len(id) < 8 {
+		return id
+	}
+	return id[:8]
 }
