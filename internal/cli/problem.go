@@ -10,44 +10,51 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func taskCmd() *cobra.Command {
+func problemCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "task <description>",
-		Short: "Create a new task",
-		Args:  cobra.MinimumNArgs(1),
+		Use:   "problem <owner>/<repo> <description>",
+		Short: "Create a new problem",
+		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			desc := strings.Join(args, " ")
+			repoSpec := args[0]
+			desc := strings.Join(args[1:], " ")
+			parts := strings.Split(repoSpec, "/")
+			if len(parts) != 2 {
+				return fmt.Errorf("repo must be owner/name")
+			}
+			owner, name := parts[0], parts[1]
+
 			cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
 			if err != nil {
 				return err
 			}
 			client := api.NewClient(cfg.DaemonSocket)
-			tr, err := client.CreateTask(desc)
+			pr, err := client.CreateProblem(owner, name, desc)
 			if err != nil {
 				return err
 			}
-			fmt.Printf("task %s created\n", tr.ID)
+			fmt.Printf("problem %s created (%s)\n", pr.ID, pr.Status)
 			return nil
 		},
 	}
 }
 
-func tasksCmd() *cobra.Command {
+func problemsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "tasks",
-		Short: "List tasks",
+		Use:   "problems",
+		Short: "List problems",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
 			if err != nil {
 				return err
 			}
 			client := api.NewClient(cfg.DaemonSocket)
-			tasks, err := client.ListTasks()
+			problems, err := client.ListProblems()
 			if err != nil {
 				return err
 			}
-			for _, t := range tasks {
-				fmt.Printf("%s  %-12s  %s\n", t.ID[:8], t.Status, t.Description)
+			for _, p := range problems {
+				fmt.Printf("%s  %-12s  %s\n", p.ID[:8], p.Status, p.Description)
 			}
 			return nil
 		},

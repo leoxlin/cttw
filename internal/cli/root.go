@@ -23,6 +23,6 @@ func Run() error {
 			return err
 		},
 	}
-	root.AddCommand(daemonCmd(), taskCmd(), tasksCmd(), tuiCmd())
+	root.AddCommand(daemonCmd(), problemCmd(), problemsCmd(), tuiCmd())
 	return root.Execute()
 }

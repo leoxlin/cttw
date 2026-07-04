@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/llin/cttw/internal/api"
@@ -15,7 +18,7 @@ type newTaskModel struct {
 
 func newNewTask(socket string) newTaskModel {
 	ta := textarea.New()
-	ta.Placeholder = "Describe the task..."
+	ta.Placeholder = "owner/repo describe the problem..."
 	ta.Focus()
 	return newTaskModel{textarea: ta, socket: socket}
 }
@@ -30,9 +33,9 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			return n, func() tea.Msg { return switchToDashboardMsg{} }
 		case "ctrl+d":
-			desc := n.textarea.Value()
-			if desc != "" {
-				go n.submit(desc)
+			value := n.textarea.Value()
+			if value != "" {
+				go n.submit(value)
 				n.sent = true
 			}
 		}
@@ -47,10 +50,20 @@ func (n newTaskModel) View() string {
 	if n.sent {
 		return "Submitting...\n\n[esc] back"
 	}
-	return "New Task (ctrl+d to submit, esc to cancel)\n\n" + n.textarea.View()
+	return "New Problem (ctrl+d to submit, esc to cancel)\n\n" + n.textarea.View()
 }
 
-func (n *newTaskModel) submit(desc string) {
+func (n *newTaskModel) submit(value string) {
+	parts := strings.SplitN(value, " ", 2)
+	if len(parts) != 2 {
+		n.err = fmt.Errorf("input must be owner/repo description")
+		return
+	}
+	repoParts := strings.Split(parts[0], "/")
+	if len(repoParts) != 2 {
+		n.err = fmt.Errorf("repo must be owner/name")
+		return
+	}
 	client := api.NewClient(n.socket)
-	client.CreateTask(desc)
+	_, n.err = client.CreateProblem(repoParts[0], repoParts[1], parts[1])
 }

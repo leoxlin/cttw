@@ -5,19 +5,19 @@ import (
 	"github.com/llin/cttw/internal/api"
 )
 
-type tasksMsg struct {
-	tasks []api.TaskResponse
-	err   error
+type problemsMsg struct {
+	problems []api.ProblemResponse
+	err      error
 }
 
 type switchToDashboardMsg struct{}
 
 type Model struct {
-	Screen  string // dashboard | newtask
-	Socket  string
-	Tasks   []api.TaskResponse
-	Err     error
-	newTask newTaskModel
+	Screen   string // dashboard | newtask
+	Socket   string
+	Problems []api.ProblemResponse
+	Err      error
+	newTask  newTaskModel
 }
 
 func New(socket string) *Model {
@@ -29,13 +29,13 @@ func New(socket string) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return m.fetchTasks
+	return m.fetchProblems
 }
 
-func (m *Model) fetchTasks() tea.Msg {
+func (m *Model) fetchProblems() tea.Msg {
 	client := api.NewClient(m.Socket)
-	tasks, err := client.ListTasks()
-	return tasksMsg{tasks: tasks, err: err}
+	problems, err := client.ListProblems()
+	return problemsMsg{problems: problems, err: err}
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -48,14 +48,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Screen = "newtask"
 		case "esc":
 			m.Screen = "dashboard"
-			return m, m.fetchTasks
+			return m, m.fetchProblems
 		}
-	case tasksMsg:
-		m.Tasks = msg.tasks
+	case problemsMsg:
+		m.Problems = msg.problems
 		m.Err = msg.err
 	case switchToDashboardMsg:
 		m.Screen = "dashboard"
-		return m, m.fetchTasks
+		return m, m.fetchProblems
 	}
 	if m.Screen == "newtask" {
 		updated, cmd := m.newTask.Update(msg)

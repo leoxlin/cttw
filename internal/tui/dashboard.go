@@ -13,17 +13,17 @@ func dashboardView(m *Model) string {
 	if m.Err != nil {
 		s += fmt.Sprintf("Error: %v\n\n", m.Err)
 	}
-	if len(m.Tasks) == 0 {
-		s += "No tasks yet.\n\n"
+	if len(m.Problems) == 0 {
+		s += "No problems yet.\n\n"
 	} else {
-		s += "Tasks:\n"
-		for _, t := range m.Tasks {
-			line := fmt.Sprintf("  %s  %-12s  %s", t.ID[:8], t.Status, t.Description)
+		s += "Problems:\n"
+		for _, p := range m.Problems {
+			line := fmt.Sprintf("  %s  %-12s  %s", p.ID[:8], p.Status, p.Description)
 			s += truncate(line, 78) + "\n"
 		}
 		s += "\n"
 	}
-	s += "Keys: [n] new task  [q] quit  [esc] refresh\n"
+	s += "Keys: [n] new problem  [q] quit  [esc] refresh\n"
 	return s
 }
 
