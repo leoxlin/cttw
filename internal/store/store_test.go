@@ -8,93 +8,69 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTask_CRUD(t *testing.T) {
+func TestRepo_CRUD(t *testing.T) {
 	s, err := New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
-
 	ctx := context.Background()
-	task, err := s.CreateTask(ctx, "add OAuth2", "owner", "repo")
+
+	repo, err := s.CreateRepo(ctx, "llin", "cttw", "/tmp/r", "main", "")
 	require.NoError(t, err)
-	assert.Equal(t, "add OAuth2", task.Description)
+	assert.Equal(t, "llin", repo.Owner)
+
+	got, err := s.GetRepoByOwnerName(ctx, "llin", "cttw")
+	require.NoError(t, err)
+	assert.Equal(t, repo.ID, got.ID)
+
+	repos, err := s.ListRepos(ctx)
+	require.NoError(t, err)
+	assert.Len(t, repos, 1)
+}
+
+func TestProblemAndTasks_CRUD(t *testing.T) {
+	s, err := New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	ctx := context.Background()
+
+	repo, _ := s.CreateRepo(ctx, "o", "r", "/tmp/r", "main", "")
+	problem, err := s.CreateProblem(ctx, "build API", repo.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", problem.Status)
+
+	task, err := s.CreateTask(ctx, problem.ID, repo.ID, "add handler", "implement POST")
+	require.NoError(t, err)
 	assert.Equal(t, "pending", task.Status)
-	assert.Equal(t, "owner", task.RepoOwner)
-	assert.Equal(t, "repo", task.RepoName)
+	assert.Equal(t, 3, task.MaxAttempts)
 
-	got, err := s.GetTask(ctx, task.ID)
-	require.NoError(t, err)
-	assert.Equal(t, task.ID, got.ID)
-
-	tasks, err := s.ListTasks(ctx)
+	tasks, err := s.ListTasksByProblem(ctx, problem.ID)
 	require.NoError(t, err)
 	assert.Len(t, tasks, 1)
 
 	task.Status = "running"
 	require.NoError(t, s.UpdateTask(ctx, task))
-	got, err = s.GetTask(ctx, task.ID)
+	got, err := s.GetTask(ctx, task.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "running", got.Status)
 }
 
-func TestChunk_CRUD(t *testing.T) {
+func TestNextPendingTask(t *testing.T) {
 	s, err := New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
 	ctx := context.Background()
 
-	task, err := s.CreateTask(ctx, "x", "o", "r")
+	repo, _ := s.CreateRepo(ctx, "o", "r", "/tmp/r", "main", "")
+	problem, _ := s.CreateProblem(ctx, "x", repo.ID)
+	task, _ := s.CreateTask(ctx, problem.ID, repo.ID, "t", "d")
+
+	got, err := s.NextPendingTask(ctx)
 	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, task.ID, got.ID)
+	assert.Equal(t, "running", got.Status)
 
-	chunk, err := s.CreateChunk(ctx, Chunk{TaskID: task.ID, Title: "c1", Description: "d1", SortOrder: 1})
+	again, err := s.NextPendingTask(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, task.ID, chunk.TaskID)
-
-	got, err := s.GetChunk(ctx, chunk.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "c1", got.Title)
-
-	chunks, err := s.ListChunksByTask(ctx, task.ID)
-	require.NoError(t, err)
-	assert.Len(t, chunks, 1)
-
-	chunk.Status = "completed"
-	chunk.PRNumber = 42
-	require.NoError(t, s.UpdateChunk(ctx, chunk))
-	got, err = s.GetChunk(ctx, chunk.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "completed", got.Status)
-	assert.Equal(t, 42, got.PRNumber)
-}
-
-func TestJob_CRUD(t *testing.T) {
-	s, err := New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-	ctx := context.Background()
-
-	task, _ := s.CreateTask(ctx, "x", "o", "r")
-	chunk, _ := s.CreateChunk(ctx, Chunk{TaskID: task.ID, Title: "c", Description: "d", SortOrder: 1})
-
-	job, err := s.CreateJob(ctx, Job{ChunkID: chunk.ID, Type: "execute"})
-	require.NoError(t, err)
-	assert.Equal(t, "pending", job.Status)
-
-	got, err := s.GetJob(ctx, job.ID)
-	require.NoError(t, err)
-	assert.Equal(t, chunk.ID, got.ChunkID)
-
-	job.Status = "running"
-	require.NoError(t, s.UpdateJob(ctx, job))
-}
-
-func TestConfig(t *testing.T) {
-	s, err := New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-	ctx := context.Background()
-
-	require.NoError(t, s.SetConfigValue(ctx, "github_token", "abc"))
-	v, err := s.GetConfigValue(ctx, "github_token")
-	require.NoError(t, err)
-	assert.Equal(t, "abc", v)
+	assert.Nil(t, again)
 }

@@ -11,21 +11,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Store provides persistent storage for tasks backed by SQLite.
+// Store provides persistent storage for repos, problems, and tasks backed by SQLite.
 type Store struct {
 	db *sql.DB
-}
-
-// Task represents a unit of work tracked by cttw.
-type Task struct {
-	ID                string
-	Description       string
-	Status            string
-	RepoOwner         string
-	RepoName          string
-	ParentIssueNumber int
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
 }
 
 // New opens the SQLite database at dbPath and runs migrations.
@@ -62,47 +50,47 @@ func (s *Store) Close() error {
 
 func migrate(db *sql.DB) error {
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS tasks (
+		`DROP TABLE IF EXISTS chunks;`,
+		`DROP TABLE IF EXISTS jobs;`,
+		`DROP TABLE IF EXISTS tasks;`,
+		`DROP TABLE IF EXISTS config;`,
+		`CREATE TABLE IF NOT EXISTS repos (
+			id TEXT PRIMARY KEY,
+			owner TEXT NOT NULL,
+			name TEXT NOT NULL,
+			local_dir TEXT NOT NULL,
+			default_branch TEXT NOT NULL,
+			clone_url TEXT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			UNIQUE(owner, name)
+		);`,
+		`CREATE TABLE IF NOT EXISTS problems (
 			id TEXT PRIMARY KEY,
 			description TEXT NOT NULL,
 			status TEXT NOT NULL,
-			repo_owner TEXT NOT NULL,
-			repo_name TEXT NOT NULL,
+			repo_id TEXT NOT NULL REFERENCES repos(id),
 			parent_issue_number INTEGER,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		);`,
-		`CREATE TABLE IF NOT EXISTS chunks (
+		`CREATE TABLE IF NOT EXISTS tasks (
 			id TEXT PRIMARY KEY,
-			task_id TEXT NOT NULL,
+			problem_id TEXT NOT NULL REFERENCES problems(id),
+			repo_id TEXT NOT NULL REFERENCES repos(id),
 			title TEXT NOT NULL,
 			description TEXT NOT NULL,
 			status TEXT NOT NULL,
-			depends_on_chunk_id TEXT,
-			output TEXT,
+			agent_session_id TEXT,
 			branch TEXT,
 			base_branch TEXT,
-			issue_number INTEGER,
 			pr_number INTEGER,
-			sort_order INTEGER NOT NULL,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS jobs (
-			id TEXT PRIMARY KEY,
-			chunk_id TEXT NOT NULL,
-			type TEXT NOT NULL,
-			status TEXT NOT NULL,
-			error TEXT,
+			issue_number INTEGER,
+			output TEXT,
 			attempts INTEGER NOT NULL DEFAULT 0,
 			max_attempts INTEGER NOT NULL DEFAULT 3,
-			created_at DATETIME,
-			started_at DATETIME,
-			completed_at DATETIME
-		);`,
-		`CREATE TABLE IF NOT EXISTS config (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
 		);`,
 	}
 	for _, stmt := range stmts {
@@ -113,22 +101,220 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
-// CreateTask inserts a new pending task and returns it.
-func (s *Store) CreateTask(ctx context.Context, description, owner, name string) (*Task, error) {
+// Repo represents a registered GitHub repository.
+type Repo struct {
+	ID            string
+	Owner         string
+	Name          string
+	LocalDir      string
+	DefaultBranch string
+	CloneURL      string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// CreateRepo inserts a new repo and returns it.
+func (s *Store) CreateRepo(ctx context.Context, owner, name, localDir, defaultBranch, cloneURL string) (*Repo, error) {
 	now := time.Now().UTC()
-	t := &Task{
+	r := &Repo{
+		ID:            uuid.New().String(),
+		Owner:         owner,
+		Name:          name,
+		LocalDir:      localDir,
+		DefaultBranch: defaultBranch,
+		CloneURL:      cloneURL,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO repos (id, owner, name, local_dir, default_branch, clone_url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Owner, r.Name, r.LocalDir, r.DefaultBranch, r.CloneURL, r.CreatedAt, r.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create repo: %w", err)
+	}
+	return r, nil
+}
+
+// GetRepo retrieves a repo by its ID.
+func (s *Store) GetRepo(ctx context.Context, id string) (*Repo, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, owner, name, local_dir, default_branch, clone_url, created_at, updated_at FROM repos WHERE id = ?`, id)
+	return scanRepo(row)
+}
+
+// GetRepoByOwnerName retrieves a repo by owner and name.
+func (s *Store) GetRepoByOwnerName(ctx context.Context, owner, name string) (*Repo, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, owner, name, local_dir, default_branch, clone_url, created_at, updated_at FROM repos WHERE owner = ? AND name = ?`, owner, name)
+	return scanRepo(row)
+}
+
+// ListRepos returns all repos ordered by creation time, newest first.
+func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, owner, name, local_dir, default_branch, clone_url, created_at, updated_at FROM repos ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var repos []Repo
+	for rows.Next() {
+		r, err := scanRepo(rows)
+		if err != nil {
+			return nil, err
+		}
+		repos = append(repos, *r)
+	}
+	return repos, rows.Err()
+}
+
+func scanRepo(s scanner) (*Repo, error) {
+	r := &Repo{}
+	err := s.Scan(&r.ID, &r.Owner, &r.Name, &r.LocalDir, &r.DefaultBranch, &r.CloneURL, &r.CreatedAt, &r.UpdatedAt)
+	return r, err
+}
+
+// Problem represents a top-level user request tracked by cttw.
+type Problem struct {
+	ID                string
+	Description       string
+	Status            string
+	RepoID            string
+	ParentIssueNumber int
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// CreateProblem inserts a new pending problem and returns it.
+func (s *Store) CreateProblem(ctx context.Context, description, repoID string) (*Problem, error) {
+	now := time.Now().UTC()
+	p := &Problem{
 		ID:          uuid.New().String(),
 		Description: description,
 		Status:      "pending",
-		RepoOwner:   owner,
-		RepoName:    name,
+		RepoID:      repoID,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO tasks (id, description, status, repo_owner, repo_name, created_at, updated_at)
+		`INSERT INTO problems (id, description, status, repo_id, parent_issue_number, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.Description, t.Status, t.RepoOwner, t.RepoName, t.CreatedAt, t.UpdatedAt,
+		p.ID, p.Description, p.Status, p.RepoID, nil, p.CreatedAt, p.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create problem: %w", err)
+	}
+	return p, nil
+}
+
+// GetProblem retrieves a problem by its ID.
+func (s *Store) GetProblem(ctx context.Context, id string) (*Problem, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, description, status, repo_id, parent_issue_number, created_at, updated_at FROM problems WHERE id = ?`, id)
+	return scanProblem(row)
+}
+
+// ListProblems returns all problems ordered by creation time, newest first.
+func (s *Store) ListProblems(ctx context.Context) ([]Problem, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, description, status, repo_id, parent_issue_number, created_at, updated_at FROM problems ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var problems []Problem
+	for rows.Next() {
+		p, err := scanProblem(rows)
+		if err != nil {
+			return nil, err
+		}
+		problems = append(problems, *p)
+	}
+	return problems, rows.Err()
+}
+
+// ListProblemsByRepo returns all problems for a repo ordered by creation time, newest first.
+func (s *Store) ListProblemsByRepo(ctx context.Context, repoID string) ([]Problem, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, description, status, repo_id, parent_issue_number, created_at, updated_at FROM problems WHERE repo_id = ? ORDER BY created_at DESC`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var problems []Problem
+	for rows.Next() {
+		p, err := scanProblem(rows)
+		if err != nil {
+			return nil, err
+		}
+		problems = append(problems, *p)
+	}
+	return problems, rows.Err()
+}
+
+// UpdateProblem persists changes to an existing problem.
+func (s *Store) UpdateProblem(ctx context.Context, p *Problem) error {
+	p.UpdatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE problems SET description=?, status=?, repo_id=?, parent_issue_number=?, updated_at=? WHERE id = ?`,
+		p.Description, p.Status, p.RepoID, p.ParentIssueNumber, p.UpdatedAt, p.ID,
+	)
+	return err
+}
+
+func scanProblem(s scanner) (*Problem, error) {
+	p := &Problem{}
+	var parent sql.NullInt64
+	err := s.Scan(&p.ID, &p.Description, &p.Status, &p.RepoID, &parent, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if parent.Valid {
+		p.ParentIssueNumber = int(parent.Int64)
+	}
+	return p, nil
+}
+
+// Task represents a unit of work within a problem, mapping to one PR.
+type Task struct {
+	ID             string
+	ProblemID      string
+	RepoID         string
+	Title          string
+	Description    string
+	Status         string
+	AgentSessionID string
+	Branch         string
+	BaseBranch     string
+	PRNumber       int
+	IssueNumber    int
+	Output         string
+	Attempts       int
+	MaxAttempts    int
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// CreateTask inserts a new pending task and returns it.
+func (s *Store) CreateTask(ctx context.Context, problemID, repoID, title, description string) (*Task, error) {
+	now := time.Now().UTC()
+	t := &Task{
+		ID:          uuid.New().String(),
+		ProblemID:   problemID,
+		RepoID:      repoID,
+		Title:       title,
+		Description: description,
+		Status:      "pending",
+		MaxAttempts: 3,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO tasks (id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.ProblemID, t.RepoID, t.Title, t.Description, t.Status, t.AgentSessionID, t.Branch, t.BaseBranch, t.PRNumber, t.IssueNumber, t.Output, t.Attempts, t.MaxAttempts, t.CreatedAt, t.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create task: %w", err)
@@ -139,21 +325,28 @@ func (s *Store) CreateTask(ctx context.Context, description, owner, name string)
 // GetTask retrieves a task by its ID.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, description, status, repo_owner, repo_name, parent_issue_number, created_at, updated_at
-		 FROM tasks WHERE id = ?`, id)
+		`SELECT id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at FROM tasks WHERE id = ?`, id)
 	return scanTask(row)
 }
 
-// ListTasks returns all tasks ordered by creation time, newest first.
-func (s *Store) ListTasks(ctx context.Context) ([]Task, error) {
+// UpdateTask persists changes to an existing task.
+func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
+	t.UpdatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET problem_id=?, repo_id=?, title=?, description=?, status=?, agent_session_id=?, branch=?, base_branch=?, pr_number=?, issue_number=?, output=?, attempts=?, max_attempts=?, updated_at=? WHERE id = ?`,
+		t.ProblemID, t.RepoID, t.Title, t.Description, t.Status, t.AgentSessionID, t.Branch, t.BaseBranch, t.PRNumber, t.IssueNumber, t.Output, t.Attempts, t.MaxAttempts, t.UpdatedAt, t.ID,
+	)
+	return err
+}
+
+// ListTasksByProblem returns all tasks for a problem ordered by creation time.
+func (s *Store) ListTasksByProblem(ctx context.Context, problemID string) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, description, status, repo_owner, repo_name, parent_issue_number, created_at, updated_at
-		 FROM tasks ORDER BY created_at DESC`)
+		`SELECT id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at FROM tasks WHERE problem_id = ? ORDER BY created_at`, problemID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var tasks []Task
 	for rows.Next() {
 		t, err := scanTask(rows)
@@ -165,239 +358,51 @@ func (s *Store) ListTasks(ctx context.Context) ([]Task, error) {
 	return tasks, rows.Err()
 }
 
-// UpdateTask persists changes to an existing task.
-func (s *Store) UpdateTask(ctx context.Context, task *Task) error {
-	task.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET description=?, status=?, repo_owner=?, repo_name=?, parent_issue_number=?, updated_at=?
-		 WHERE id = ?`,
-		task.Description, task.Status, task.RepoOwner, task.RepoName, task.ParentIssueNumber,
-		task.UpdatedAt, task.ID,
-	)
-	return err
-}
-
-type scanner interface {
-	Scan(dest ...any) error
-}
-
-func scanTask(s scanner) (*Task, error) {
-	t := &Task{}
-	var parent sql.NullInt64
-	err := s.Scan(&t.ID, &t.Description, &t.Status, &t.RepoOwner, &t.RepoName,
-		&parent, &t.CreatedAt, &t.UpdatedAt)
-	if err != nil {
-		return nil, err
-	}
-	if parent.Valid {
-		t.ParentIssueNumber = int(parent.Int64)
-	}
-	return t, nil
-}
-
-// Chunk represents a discrete unit of work within a task.
-type Chunk struct {
-	ID               string
-	TaskID           string
-	Title            string
-	Description      string
-	Status           string
-	DependsOnChunkID string
-	Output           string
-	Branch           string
-	BaseBranch       string
-	IssueNumber      int
-	PRNumber         int
-	SortOrder        int
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-}
-
-// CreateChunk inserts a new pending chunk and returns it.
-func (s *Store) CreateChunk(ctx context.Context, c Chunk) (*Chunk, error) {
-	now := time.Now().UTC()
-	c.ID = uuid.New().String()
-	c.Status = "pending"
-	c.CreatedAt = now
-	c.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO chunks (id, task_id, title, description, status, depends_on_chunk_id, output, branch, base_branch, issue_number, pr_number, sort_order, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		c.ID, c.TaskID, c.Title, c.Description, c.Status, c.DependsOnChunkID, c.Output,
-		c.Branch, c.BaseBranch, c.IssueNumber, c.PRNumber, c.SortOrder, c.CreatedAt, c.UpdatedAt,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create chunk: %w", err)
-	}
-	return &c, nil
-}
-
-// GetChunk retrieves a chunk by its ID.
-func (s *Store) GetChunk(ctx context.Context, id string) (*Chunk, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT id, task_id, title, description, status, depends_on_chunk_id, output, branch, base_branch, issue_number, pr_number, sort_order, created_at, updated_at
-		 FROM chunks WHERE id = ?`, id)
-	return scanChunk(row)
-}
-
-// ListChunksByTask returns all chunks for a task ordered by sort_order.
-func (s *Store) ListChunksByTask(ctx context.Context, taskID string) ([]Chunk, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, task_id, title, description, status, depends_on_chunk_id, output, branch, base_branch, issue_number, pr_number, sort_order, created_at, updated_at
-		 FROM chunks WHERE task_id = ? ORDER BY sort_order`, taskID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var chunks []Chunk
-	for rows.Next() {
-		c, err := scanChunk(rows)
-		if err != nil {
-			return nil, err
-		}
-		chunks = append(chunks, *c)
-	}
-	return chunks, rows.Err()
-}
-
-// UpdateChunk persists changes to an existing chunk.
-func (s *Store) UpdateChunk(ctx context.Context, c *Chunk) error {
-	c.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE chunks SET title=?, description=?, status=?, depends_on_chunk_id=?, output=?, branch=?, base_branch=?, issue_number=?, pr_number=?, sort_order=?, updated_at=?
-		 WHERE id = ?`,
-		c.Title, c.Description, c.Status, c.DependsOnChunkID, c.Output, c.Branch, c.BaseBranch,
-		c.IssueNumber, c.PRNumber, c.SortOrder, c.UpdatedAt, c.ID,
-	)
-	return err
-}
-
-func scanChunk(s scanner) (*Chunk, error) {
-	c := &Chunk{}
-	err := s.Scan(&c.ID, &c.TaskID, &c.Title, &c.Description, &c.Status, &c.DependsOnChunkID,
-		&c.Output, &c.Branch, &c.BaseBranch, &c.IssueNumber, &c.PRNumber, &c.SortOrder,
-		&c.CreatedAt, &c.UpdatedAt)
-	return c, err
-}
-
-// Job represents a queued operation for a chunk.
-type Job struct {
-	ID          string
-	ChunkID     string
-	Type        string
-	Status      string
-	Error       string
-	Attempts    int
-	MaxAttempts int
-	CreatedAt   *time.Time
-	StartedAt   *time.Time
-	CompletedAt *time.Time
-}
-
-// CreateJob inserts a new pending job and returns it.
-func (s *Store) CreateJob(ctx context.Context, j Job) (*Job, error) {
-	now := time.Now().UTC()
-	j.ID = uuid.New().String()
-	j.Status = "pending"
-	j.CreatedAt = &now
-	if j.MaxAttempts == 0 {
-		j.MaxAttempts = 3
-	}
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO jobs (id, chunk_id, type, status, error, attempts, max_attempts, created_at, started_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.ID, j.ChunkID, j.Type, j.Status, j.Error, j.Attempts, j.MaxAttempts,
-		j.CreatedAt, j.StartedAt, j.CompletedAt,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create job: %w", err)
-	}
-	return &j, nil
-}
-
-// GetJob retrieves a job by its ID.
-func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT id, chunk_id, type, status, error, attempts, max_attempts, created_at, started_at, completed_at
-		 FROM jobs WHERE id = ?`, id)
-	return scanJob(row)
-}
-
-// UpdateJob persists changes to an existing job.
-func (s *Store) UpdateJob(ctx context.Context, j *Job) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET chunk_id=?, type=?, status=?, error=?, attempts=?, max_attempts=?, created_at=?, started_at=?, completed_at=?
-		 WHERE id = ?`,
-		j.ChunkID, j.Type, j.Status, j.Error, j.Attempts, j.MaxAttempts,
-		j.CreatedAt, j.StartedAt, j.CompletedAt, j.ID,
-	)
-	return err
-}
-
-// NextPendingJob selects the oldest pending job whose chunk dependencies are
-// satisfied, atomically marks it as running, and returns it. If no job is
-// available it returns nil, nil.
-func (s *Store) NextPendingJob(ctx context.Context) (*Job, error) {
+// NextPendingTask selects the oldest pending task whose attempts are below max,
+// atomically marks it as running, and returns it.
+func (s *Store) NextPendingTask(ctx context.Context) (*Task, error) {
 	row := s.db.QueryRowContext(ctx,
 		`WITH next AS (
-			SELECT j.id
-			FROM jobs j
-			JOIN chunks c ON c.id = j.chunk_id
-			WHERE j.status = 'pending'
-			  AND j.attempts < j.max_attempts
-			  AND (c.depends_on_chunk_id IS NULL OR c.depends_on_chunk_id = '' OR
-			       (SELECT status FROM chunks WHERE id = c.depends_on_chunk_id) = 'completed')
-			ORDER BY j.created_at LIMIT 1
+			SELECT id FROM tasks WHERE status = 'pending' AND attempts < max_attempts ORDER BY created_at LIMIT 1
 		)
-		UPDATE jobs
-		SET status = 'running', started_at = ?
+		UPDATE tasks SET status = 'running', updated_at = ?
 		WHERE id = (SELECT id FROM next) AND status = 'pending'
-		RETURNING id, chunk_id, type, status, error, attempts, max_attempts, created_at, started_at, completed_at`,
+		RETURNING id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at`,
 		time.Now().UTC())
-	j, err := scanJob(row)
+	t, err := scanTask(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return j, nil
+	return t, nil
 }
 
-// ResetRunningJobs resets jobs that were running at startup to pending so they
+// ResetRunningTasks resets tasks that were running at startup to pending so they
 // can be retried after a crash or unclean shutdown.
-func (s *Store) ResetRunningJobs(ctx context.Context) error {
+func (s *Store) ResetRunningTasks(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET status='pending' WHERE status='running' AND attempts < max_attempts`)
+		`UPDATE tasks SET status='pending' WHERE status='running' AND attempts < max_attempts`)
 	return err
 }
 
-// RevertJobToPending resets a running job back to pending without incrementing
-// attempts. It is used when a job was claimed but could not be dispatched.
-func (s *Store) RevertJobToPending(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET status='pending' WHERE id=? AND status='running'`, id)
-	return err
+func scanTask(s scanner) (*Task, error) {
+	t := &Task{}
+	var pr, issue sql.NullInt64
+	err := s.Scan(&t.ID, &t.ProblemID, &t.RepoID, &t.Title, &t.Description, &t.Status, &t.AgentSessionID, &t.Branch, &t.BaseBranch, &pr, &issue, &t.Output, &t.Attempts, &t.MaxAttempts, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if pr.Valid {
+		t.PRNumber = int(pr.Int64)
+	}
+	if issue.Valid {
+		t.IssueNumber = int(issue.Int64)
+	}
+	return t, nil
 }
 
-func scanJob(s scanner) (*Job, error) {
-	j := &Job{}
-	err := s.Scan(&j.ID, &j.ChunkID, &j.Type, &j.Status, &j.Error, &j.Attempts, &j.MaxAttempts,
-		&j.CreatedAt, &j.StartedAt, &j.CompletedAt)
-	return j, err
-}
-
-// SetConfigValue stores or updates a config value by key.
-func (s *Store) SetConfigValue(ctx context.Context, key, value string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO config (key, value) VALUES (?, ?)
-		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
-	return err
-}
-
-// GetConfigValue retrieves a config value by key.
-func (s *Store) GetConfigValue(ctx context.Context, key string) (string, error) {
-	var value string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM config WHERE key = ?`, key).Scan(&value)
-	return value, err
+type scanner interface {
+	Scan(dest ...any) error
 }
