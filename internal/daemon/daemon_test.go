@@ -44,7 +44,9 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
-	_, err = s.CreateRepo(ctx, "llin", "cttw", "/tmp/r", "main", "")
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	_, err = s.CreateRepo(ctx, "llin", "cttw", repoDir, "main", "")
 	require.NoError(t, err)
 
 	ml := &launcher.MockLauncher{}
@@ -55,8 +57,9 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	}
 
 	gh := &mockGH{issues: make(map[string]int)}
-	coord := coordinator.New(s, ml, &repo.Registry{Root: "/tmp/repos"}, gh)
-	w := worker.New(s, ml, &repo.Registry{Root: "/tmp/repos"}, gh)
+	regRoot := filepath.Join(t.TempDir(), "repos")
+	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh)
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh)
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{

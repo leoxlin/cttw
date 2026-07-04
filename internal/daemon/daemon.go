@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,7 +83,9 @@ func (s *Server) workerLoop(ctx context.Context) {
 		case <-s.shutdown:
 			return
 		case <-ticker.C:
-			_ = s.Worker.RunOnce(ctx)
+			if err := s.Worker.RunOnce(ctx); err != nil {
+				log.Printf("worker run: %v", err)
+			}
 		}
 	}
 }
@@ -103,10 +106,7 @@ func (s *Server) Serve() error {
 
 	srv := &http.Server{Handler: mux}
 	go func() {
-		select {
-		case <-s.shutdown:
-		case <-time.After(100 * time.Millisecond):
-		}
+		<-s.shutdown
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
@@ -188,6 +188,10 @@ func (s *Server) handleGetProblem(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	problem, err := s.Store.GetProblem(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -259,9 +263,12 @@ func registerRepos(ctx context.Context, s *store.Store, reg *repo.Registry, cfg 
 			existing.LocalDir = repo.Dir
 			existing.DefaultBranch = repo.DefaultBranch
 			if err := s.UpdateRepo(ctx, existing); err != nil {
-				return err
+				return fmt.Errorf("update repo %s/%s: %w", rc.Owner, rc.Name, err)
 			}
 			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("lookup repo %s/%s: %w", rc.Owner, rc.Name, err)
 		}
 		if _, err := s.CreateRepo(ctx, rc.Owner, rc.Name, dir, rc.DefaultBranch, ""); err != nil {
 			return fmt.Errorf("register repo %s/%s: %w", rc.Owner, rc.Name, err)

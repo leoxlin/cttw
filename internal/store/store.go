@@ -144,7 +144,10 @@ func (s *Store) UpdateRepo(ctx context.Context, r *Repo) error {
 		`UPDATE repos SET owner=?, name=?, local_dir=?, default_branch=?, clone_url=?, updated_at=? WHERE id = ?`,
 		r.Owner, r.Name, r.LocalDir, r.DefaultBranch, r.CloneURL, r.UpdatedAt, r.ID,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("update repo: %w", err)
+	}
+	return nil
 }
 
 // GetRepo retrieves a repo by its ID.
