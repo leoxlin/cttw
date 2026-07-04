@@ -30,6 +30,7 @@ type Client struct {
 	pending map[int64]chan Envelope
 	closed  bool
 	closeCh chan struct{}
+	// errCh is a best-effort sink for malformed messages and unmatched responses.
 	errCh   chan error
 }
 
@@ -50,13 +51,10 @@ func (c *Client) SetHandler(h Handler) {
 
 // Start begins reading messages from the transport and dispatching them.
 func (c *Client) Start(ctx context.Context) error {
-	// Start the transport read loop so Recv can consume buffered lines.
-	// Transports such as StdioTransport need an explicit Start call.
-	if s, ok := c.transport.(interface{ Start(context.Context) error }); ok {
-		go func() {
-			_ = s.Start(ctx)
-		}()
-	}
+	// Drive the transport read loop so Recv can consume buffered lines.
+	go func() {
+		_ = c.transport.Start(ctx)
+	}()
 
 	for {
 		line, err := c.transport.Recv(ctx)
@@ -68,6 +66,10 @@ func (c *Client) Start(ctx context.Context) error {
 		}
 		env, err := ParseMessage(line)
 		if err != nil {
+			select {
+			case c.errCh <- fmt.Errorf("acp: malformed message: %w", err):
+			default:
+			}
 			continue
 		}
 		if env.ID != nil && env.Method != "" {
@@ -95,10 +97,18 @@ func (c *Client) routeResponse(env Envelope) {
 	defer c.mu.Unlock()
 	var id int64
 	if err := json.Unmarshal(env.ID, &id); err != nil {
+		select {
+		case c.errCh <- fmt.Errorf("acp: malformed response id: %w", err):
+		default:
+		}
 		return
 	}
 	ch, ok := c.pending[id]
 	if !ok {
+		select {
+		case c.errCh <- fmt.Errorf("acp: unmatched response id %d", id):
+		default:
+		}
 		return
 	}
 	select {
@@ -114,9 +124,6 @@ func (c *Client) handleRequest(ctx context.Context, env Envelope) error {
 	if h == nil {
 		return c.sendError(ctx, env.ID, -32601, "no handler")
 	}
-
-	var id int64
-	_ = json.Unmarshal(env.ID, &id)
 
 	switch env.Method {
 	case "fs/readTextFile":
@@ -200,7 +207,10 @@ func (c *Client) call(ctx context.Context, method string, params any) (Envelope,
 	}
 
 	select {
-	case env := <-ch:
+	case env, ok := <-ch:
+		if !ok {
+			return Envelope{}, fmt.Errorf("client closed")
+		}
 		return env, nil
 	case <-ctx.Done():
 		return Envelope{}, ctx.Err()

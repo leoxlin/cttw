@@ -11,6 +11,7 @@ import (
 
 // Transport sends and receives line-delimited JSON-RPC messages.
 type Transport interface {
+	Start(ctx context.Context) error
 	Send(ctx context.Context, data []byte) error
 	Recv(ctx context.Context) ([]byte, error)
 	Close() error

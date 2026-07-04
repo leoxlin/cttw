@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockHandler records calls and returns canned responses.
+// mockHandler returns canned responses for agent-to-client method calls.
 type mockHandler struct {
 	readFile ReadTextFileResponse
 }
@@ -135,6 +135,87 @@ func TestClient_HandlerRespondsToServerRequest(t *testing.T) {
 	var res ReadTextFileResponse
 	require.NoError(t, json.Unmarshal(got.Result, &res))
 	assert.Equal(t, "file contents", res.Content)
+
+	_ = client.Close()
+	_ = agentIn.Close()
+}
+
+func TestClient_CloseWhilePending(t *testing.T) {
+	inReader, _ := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := NewClient(NewStdioTransport(outWriter, inReader))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = client.Start(ctx) }()
+	// Drain the client's writes so the pending call makes it past Send.
+	go func() { _, _ = io.Copy(io.Discard, outReader) }()
+
+	var err error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err = client.Initialize(ctx, InitializeRequest{
+			ProtocolVersion: 1,
+			ClientInfo:      Info{Name: "cttw", Version: "0.1"},
+		})
+	}()
+
+	// Give the call time to enter the pending map before closing.
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, client.Close())
+	<-done
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "client closed")
+}
+
+func TestClient_MalformedAndUnmatchedResponsesIgnored(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	agentIn := NewStdioTransport(inWriter, outReader)
+	client := NewClient(NewStdioTransport(outWriter, inReader))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = client.Start(ctx) }()
+	go func() { _ = agentIn.Start(ctx) }()
+
+	go func() {
+		line, _ := agentIn.Recv(ctx)
+		var env Envelope
+		_ = json.Unmarshal(line, &env)
+		require.Equal(t, "initialize", env.Method)
+
+		// Malformed line should not stop the read loop.
+		_ = agentIn.Send(ctx, []byte("not valid json"))
+
+		// Unmatched response should be ignored, not fatal.
+		bad, _ := json.Marshal(Envelope{
+			JSONRPC: "2.0",
+			ID:      json.RawMessage(`999`),
+			Result:  json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"fake","version":"1"},"authMethods":[]}`),
+		})
+		_ = agentIn.Send(ctx, bad)
+
+		// Correct response should still be routed to the pending call.
+		good, _ := json.Marshal(Envelope{
+			JSONRPC: "2.0",
+			ID:      env.ID,
+			Result:  json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"fake","version":"1"},"authMethods":[]}`),
+		})
+		_ = agentIn.Send(ctx, good)
+	}()
+
+	initRes, err := client.Initialize(ctx, InitializeRequest{
+		ProtocolVersion: 1,
+		ClientInfo:      Info{Name: "cttw", Version: "0.1"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, initRes.ProtocolVersion)
 
 	_ = client.Close()
 	_ = agentIn.Close()
