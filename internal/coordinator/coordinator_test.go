@@ -4,46 +4,64 @@ import (
 	"context"
 	"testing"
 
+	"github.com/llin/cttw/internal/launcher"
+	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-type fakeGH struct{ issueNum int }
+type mockGitHub struct {
+	issues    map[string]int
+	subIssues [][2]int
+}
 
-func (f *fakeGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
-	f.issueNum++
-	return f.issueNum, nil
+func (m *mockGitHub) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
+	m.issues[title] = len(m.issues) + 1
+	return m.issues[title], nil
 }
-func (f *fakeGH) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
+
+func (m *mockGitHub) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
+	m.subIssues = append(m.subIssues, [2]int{parentNumber, childNumber})
 	return nil
 }
-func (f *fakeGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
+
+func (m *mockGitHub) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
 	return nil
 }
-func (f *fakeGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
+
+func (m *mockGitHub) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	return 0, nil
 }
 
-type fakeLLM struct{ resp string }
-
-func (f *fakeLLM) Chat(ctx context.Context, system, user string) (string, error) { return f.resp, nil }
-
-func TestCoordinator_StartTask(t *testing.T) {
+func TestCoordinator_CreateProblem(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
 
-	resp := `[{"title":"c1","description":"d1"}]`
-	c := &Coordinator{LLM: &fakeLLM{resp: resp}, GH: &fakeGH{}, Store: s, Owner: "o", Repo: "r"}
+	// Seed repo record.
 	ctx := context.Background()
-
-	task, err := c.StartTask(ctx, "build API")
+	r, err := s.CreateRepo(ctx, "llin", "cttw", "/tmp/r", "main", "")
 	require.NoError(t, err)
-	assert.Equal(t, "build API", task.Description)
 
-	chunks, err := s.ListChunksByTask(ctx, task.ID)
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{`[{"title":"add handler","description":"implement POST /api/tasks"},{"title":"add tests","description":"write unit tests"}]`},
+		}, nil
+	}
+
+	coord := New(s, ml, &repo.Registry{Root: "/tmp/repos"}, &mockGitHub{issues: make(map[string]int)})
+	problem, err := coord.CreateProblem(ctx, "llin", "cttw", "build the API")
 	require.NoError(t, err)
-	assert.Len(t, chunks, 1)
-	assert.Equal(t, "c1", chunks[0].Title)
+	assert.Equal(t, "ready", problem.Status)
+	assert.Greater(t, problem.ParentIssueNumber, 0)
+
+	tasks, err := s.ListTasksByProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	assert.Equal(t, "add handler", tasks[0].Title)
+	assert.Equal(t, "implement POST /api/tasks", tasks[0].Description)
+	assert.Equal(t, "pending", tasks[0].Status)
+	assert.Equal(t, r.ID, tasks[0].RepoID)
 }
