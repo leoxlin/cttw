@@ -28,6 +28,7 @@ func TestMockLauncher_LaunchAndPrompt(t *testing.T) {
 
 	res, err := agent.Prompt(context.Background(), "decompose this task")
 	require.NoError(t, err)
+	assert.Equal(t, "decomposed", res.Content)
 	assert.Equal(t, "end_turn", res.StopReason)
 	assert.Equal(t, "decompose this task", ml.Agent.PromptsReceived[0])
 

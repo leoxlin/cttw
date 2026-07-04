@@ -41,7 +41,10 @@ func (m *MockAgent) Prompt(ctx context.Context, prompt string) (*acp.PromptRespo
 		return nil, fmt.Errorf("no scripted response")
 	}
 	m.responseIndex++
-	return &acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+	return &acp.PromptResponse{
+		Content:    m.Responses[m.responseIndex-1],
+		StopReason: acp.StopReasonEndTurn,
+	}, nil
 }
 
 func (m *MockAgent) Close(ctx context.Context) error {

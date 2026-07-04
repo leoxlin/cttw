@@ -162,6 +162,7 @@ type PromptRequest struct {
 }
 
 type PromptResponse struct {
+	Content    string `json:"content"`
 	StopReason string `json:"stopReason"`
 }
 
