@@ -2,149 +2,143 @@ package worker
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
-	"time"
 
-	"github.com/llin/cttw/internal/gitexec"
+	"github.com/llin/cttw/internal/acp"
 	"github.com/llin/cttw/internal/github"
-	"github.com/llin/cttw/internal/llm"
+	"github.com/llin/cttw/internal/launcher"
+	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
 )
 
 type Worker struct {
-	GH            github.Client
-	Git           *gitexec.Runner
-	LLM           llm.Client
-	Store         *store.Store
-	Owner         string
-	Repo          string
-	DefaultBranch string
+	store    *store.Store
+	launcher launcher.Launcher
+	repos    *repo.Registry
+	gh       github.Client
 }
 
-func (w *Worker) baseBranch() string {
-	if w.DefaultBranch != "" {
-		return w.DefaultBranch
-	}
-	return "main"
+func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client) *Worker {
+	return &Worker{store: store, launcher: launcher, repos: repos, gh: gh}
 }
 
-func (w *Worker) Execute(ctx context.Context, jobID string) error {
-	job, err := w.Store.GetJob(ctx, jobID)
+func (w *Worker) RunOnce(ctx context.Context) error {
+	task, err := w.store.NextPendingTask(ctx)
 	if err != nil {
 		return err
 	}
-	chunk, err := w.Store.GetChunk(ctx, job.ChunkID)
+	if task == nil {
+		return nil
+	}
+	if err := w.ExecuteTask(ctx, task); err != nil {
+		task.Status = "failed"
+		task.Output = err.Error()
+		task.Attempts++
+		_ = w.store.UpdateTask(ctx, task)
+		return err
+	}
+	return nil
+}
+
+func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
+	task.Status = "running"
+	if err := w.store.UpdateTask(ctx, task); err != nil {
+		return fmt.Errorf("mark running: %w", err)
+	}
+
+	r, err := w.store.GetRepo(ctx, task.RepoID)
 	if err != nil {
-		return err
+		return fmt.Errorf("get repo: %w", err)
 	}
 
-	job.Status = "running"
-	job.Attempts++
-	now := time.Now().UTC()
-	job.StartedAt = &now
-	if err := w.Store.UpdateJob(ctx, job); err != nil {
-		return err
-	}
-
-	base := w.baseBranch()
-	if chunk.DependsOnChunkID != "" {
-		dep, err := w.Store.GetChunk(ctx, chunk.DependsOnChunkID)
-		if err == nil && dep.Branch != "" {
-			base = dep.Branch
-		}
-	}
-	branch := fmt.Sprintf("cttw/%s/%s", shortID(chunk.TaskID), slug(chunk.Title))
-	chunk.Branch = branch
-	chunk.BaseBranch = base
-	chunk.Status = "running"
-	if err := w.Store.UpdateChunk(ctx, chunk); err != nil {
-		return err
-	}
-
-	if err := w.Git.CheckoutNew(branch, base); err != nil {
-		return w.fail(ctx, job, chunk, err)
-	}
-
-	if w.LLM != nil {
-		prompt := fmt.Sprintf("Implement this chunk in Go:\n%s\n\n%s", chunk.Title, chunk.Description)
-		out, err := w.LLM.Chat(ctx, "", prompt)
-		if err != nil {
-			return w.fail(ctx, job, chunk, err)
-		}
-		artifact := filepath.Join(w.Git.Dir, fmt.Sprintf("cttw-chunk-%s.md", shortID(chunk.ID)))
-		if err := os.WriteFile(artifact, []byte(out), 0644); err != nil {
-			return w.fail(ctx, job, chunk, fmt.Errorf("write llm artifact: %w", err))
-		}
-	}
-
-	if err := w.Git.Add("."); err != nil {
-		return w.fail(ctx, job, chunk, err)
-	}
-	if err := w.Git.Commit(fmt.Sprintf("feat: %s", chunk.Title)); err != nil {
-		return w.fail(ctx, job, chunk, err)
-	}
-	if err := w.Git.Push(branch); err != nil {
-		return w.fail(ctx, job, chunk, err)
-	}
-
-	prNum, err := w.GH.CreatePullRequest(ctx, w.Owner, w.Repo,
-		fmt.Sprintf("[cttw] %s", chunk.Title),
-		chunk.Description,
-		branch, base)
+	problem, err := w.store.GetProblem(ctx, task.ProblemID)
 	if err != nil {
-		return w.fail(ctx, job, chunk, err)
+		return fmt.Errorf("get problem: %w", err)
 	}
 
-	chunk.PRNumber = prNum
-	chunk.Status = "completed"
-	if err := w.Store.UpdateChunk(ctx, chunk); err != nil {
-		return err
+	agent, err := w.launcher.Launch(ctx, launcher.LaunchSpec{
+		Backend: "codex",
+		Repo:    launcher.RepoContext{Owner: r.Owner, Name: r.Name, DefaultBranch: r.DefaultBranch, LocalDir: r.LocalDir},
+		Task: launcher.TaskContext{
+			ProblemDescription: problem.Description,
+			TaskTitle:          task.Title,
+			TaskDescription:    task.Description,
+			BaseBranch:         r.DefaultBranch,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("launch task agent: %w", err)
 	}
-	job.Status = "completed"
-	completed := time.Now().UTC()
-	job.CompletedAt = &completed
-	return w.Store.UpdateJob(ctx, job)
+	defer agent.Close(ctx)
+
+	if err := agent.Initialize(ctx); err != nil {
+		return fmt.Errorf("initialize agent: %w", err)
+	}
+	if err := agent.NewSession(ctx, acp.NewSessionRequest{CWD: r.LocalDir}); err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+
+	prompt := fmt.Sprintf(`You are a software engineer. Implement the following task in the repository.
+
+Repository: %s/%s
+Base branch: %s
+Task: %s
+Description: %s
+
+Create a feature branch, make the necessary changes, commit, push the branch, and open a pull request targeting the base branch. Then report the result as JSON:
+
+{"pr_number": <number>, "branch": "<branch-name>", "status": "completed"}
+
+If you cannot complete the task, return:
+{"status": "failed", "error": "<reason>"}
+
+Return ONLY the JSON object, no markdown fences.`, r.Owner, r.Name, r.DefaultBranch, task.Title, task.Description)
+
+	res, err := agent.Prompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("prompt agent: %w", err)
+	}
+
+	out, err := parseTaskResult(res.Content)
+	if err != nil {
+		return fmt.Errorf("parse task result: %w", err)
+	}
+
+	task.Branch = out.Branch
+	task.PRNumber = out.PRNumber
+	if out.Status == "failed" {
+		task.Status = "failed"
+		task.Output = out.Error
+		task.Attempts++
+		return fmt.Errorf("task failed: %s", out.Error)
+	}
+	task.Status = "completed"
+	if err := w.store.UpdateTask(ctx, task); err != nil {
+		return fmt.Errorf("update task: %w", err)
+	}
+	return nil
 }
 
-func (w *Worker) fail(ctx context.Context, job *store.Job, chunk *store.Chunk, cause error) error {
-	job.Status = "failed"
-	job.Error = cause.Error()
-	chunk.Status = "failed"
-	chunk.Output = cause.Error()
-
-	var errs []error
-	if err := w.Store.UpdateJob(ctx, job); err != nil {
-		errs = append(errs, fmt.Errorf("persist failed job: %w", err))
-	}
-	if err := w.Store.UpdateChunk(ctx, chunk); err != nil {
-		errs = append(errs, fmt.Errorf("persist failed chunk: %w", err))
-	}
-	if len(errs) > 0 {
-		return errors.Join(append([]error{cause}, errs...)...)
-	}
-	return cause
+type taskResult struct {
+	Status   string `json:"status"`
+	PRNumber int    `json:"pr_number"`
+	Branch   string `json:"branch"`
+	Error    string `json:"error"`
 }
 
-var slugInvalid = regexp.MustCompile(`[^a-z0-9_]+`)
-
-func slug(s string) string {
-	s = strings.ToLower(s)
-	s = slugInvalid.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		return "chunk"
+func parseTaskResult(content string) (taskResult, error) {
+	content = strings.TrimSpace(content)
+	if idx := strings.Index(content, "{"); idx > 0 {
+		content = content[idx:]
 	}
-	return s
-}
-
-func shortID(id string) string {
-	if len(id) < 8 {
-		return id
+	if idx := strings.LastIndex(content, "}"); idx > 0 {
+		content = content[:idx+1]
 	}
-	return id[:8]
+	var out taskResult
+	if err := json.Unmarshal([]byte(content), &out); err != nil {
+		return taskResult{}, err
+	}
+	return out, nil
 }
