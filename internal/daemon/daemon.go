@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,22 +14,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/llin/cttw/internal/api"
 	"github.com/llin/cttw/internal/config"
 	"github.com/llin/cttw/internal/coordinator"
-	"github.com/llin/cttw/internal/gitexec"
 	"github.com/llin/cttw/internal/github"
-	"github.com/llin/cttw/internal/llm"
+	"github.com/llin/cttw/internal/launcher"
+	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
 	"github.com/llin/cttw/internal/worker"
 )
 
-type Daemon struct {
+type Server struct {
 	Store        *store.Store
 	Coordinator  *coordinator.Coordinator
-	Pool         *worker.Pool
-	Owner        string
-	Name         string
+	Worker       *worker.Worker
 	Socket       string
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
@@ -39,108 +35,84 @@ type Daemon struct {
 func Run() error {
 	cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("load config: %w", err)
 	}
-	repo := cfg.Repos[0]
-	owner, name := repo.Owner, repo.Name
 
 	s, err := store.New(dbPath())
 	if err != nil {
-		return err
+		return fmt.Errorf("open store: %w", err)
 	}
-	defer s.Close()
 
 	gh := github.New(cfg.GitHubToken, nil)
-	llmClient := llm.New("https://api.openai.com/v1", "", "gpt-4o", nil)
-
-	d := &Daemon{
-		Store:    s,
-		Owner:    owner,
-		Name:     name,
-		Socket:   cfg.DaemonSocket,
-		shutdown: make(chan struct{}),
+	reg := &repo.Registry{Root: reposRoot()}
+	if err := registerRepos(context.Background(), s, reg, cfg); err != nil {
+		s.Close()
+		return fmt.Errorf("register repos: %w", err)
 	}
 
-	coord := &coordinator.Coordinator{LLM: llmClient, GH: gh, Store: s, Owner: owner, Repo: name}
-	d.Coordinator = coord
+	ln := launcher.NewCodexLauncher(cfg)
+	coord := coordinator.New(s, ln, reg, gh)
+	w := worker.New(s, ln, reg, gh)
 
-	gitRunner := &gitexec.Runner{Dir: repoDir()}
-	w := &worker.Worker{GH: gh, LLM: llmClient, Store: s, Owner: owner, Repo: name, Git: gitRunner, DefaultBranch: repo.DefaultBranch}
-	d.Pool = &worker.Pool{Worker: w, Store: s}
-	defer d.Pool.Stop()
-
-	if err := ensureRepo(owner, name, cfg.GitHubToken, repoDir()); err != nil {
-		return err
+	srv := &Server{
+		Store:       s,
+		Coordinator: coord,
+		Worker:      w,
+		Socket:      cfg.DaemonSocket,
+		shutdown:    make(chan struct{}),
 	}
+	return srv.run()
+}
 
+func (s *Server) run() error {
+	defer s.Store.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Pool.Start(ctx)
-
-	return d.serve()
+	go s.workerLoop(ctx)
+	return s.Serve()
 }
 
-func dbPath() string {
-	if v := os.Getenv("CTTW_DB"); v != "" {
-		return v
-	}
-	home, _ := os.UserHomeDir()
-	return fmt.Sprintf("%s/.local/share/cttw/cttw.db", home)
-}
-
-func ensureRepo(owner, name, token, dir string) error {
-	if _, err := os.Stat(dir); err == nil {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return nil
+func (s *Server) workerLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.shutdown:
+			return
+		case <-ticker.C:
+			_ = s.Worker.RunOnce(ctx)
 		}
-		if err := os.RemoveAll(dir); err != nil {
-			return fmt.Errorf("remove invalid repo dir %s: %w", dir, err)
-		}
-	} else if !os.IsNotExist(err) {
-		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0755); err != nil {
-		return err
-	}
-	repo := fmt.Sprintf("https://github.com/%s/%s.git", owner, name)
-	return (&gitexec.Runner{}).Clone(repo, token, dir)
 }
 
-func repoDir() string {
-	if v := os.Getenv("CTTW_REPO_DIR"); v != "" {
-		return v
-	}
-	home, _ := os.UserHomeDir()
-	return fmt.Sprintf("%s/.local/share/cttw/repo", home)
-}
-
-func (d *Daemon) serve() error {
+func (s *Server) Serve() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/tasks", d.handleCreateTask)
-	mux.HandleFunc("GET /api/v1/tasks", d.handleListTasks)
-	mux.HandleFunc("GET /api/v1/tasks/{id}", d.handleGetTask)
-	mux.HandleFunc("GET /api/v1/status", d.handleStatus)
-	mux.HandleFunc("POST /api/v1/shutdown", d.handleShutdown)
+	mux.HandleFunc("POST /api/v1/problems", s.handleCreateProblem)
+	mux.HandleFunc("GET /api/v1/problems", s.handleListProblems)
+	mux.HandleFunc("GET /api/v1/problems/{id}", s.handleGetProblem)
+	mux.HandleFunc("GET /api/v1/status", s.handleStatus)
+	mux.HandleFunc("POST /api/v1/shutdown", s.handleShutdown)
 
-	l, addr, err := d.listen()
+	l, addr, err := s.listen()
 	if err != nil {
 		return err
 	}
 	log.Printf("daemon listening on %s", addr)
 
 	srv := &http.Server{Handler: mux}
-	if d.shutdown != nil {
-		go func() {
-			<-d.shutdown
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := srv.Shutdown(ctx); err != nil {
-				log.Printf("server shutdown: %v", err)
-			}
-			d.Pool.Stop()
-			d.Store.Close()
-		}()
-	}
+	go func() {
+		select {
+		case <-s.shutdown:
+		case <-time.After(100 * time.Millisecond):
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("server shutdown: %v", err)
+		}
+	}()
 
 	if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -148,11 +120,15 @@ func (d *Daemon) serve() error {
 	return nil
 }
 
-func (d *Daemon) listen() (net.Listener, string, error) {
-	addr := d.Socket
+func (s *Server) Shutdown() {
+	s.shutdownOnce.Do(func() { close(s.shutdown) })
+}
+
+func (s *Server) listen() (net.Listener, string, error) {
+	addr := s.Socket
 	if strings.HasPrefix(addr, "unix://") {
 		path := strings.TrimPrefix(addr, "unix://")
-		os.Remove(path)
+		_ = os.Remove(path)
 		l, err := net.Listen("unix", path)
 		if err != nil {
 			return nil, "", err
@@ -170,96 +146,142 @@ func (d *Daemon) listen() (net.Listener, string, error) {
 	return l, l.Addr().String(), nil
 }
 
-func (d *Daemon) handleCreateTask(w http.ResponseWriter, r *http.Request) {
-	var req api.CreateTaskRequest
+func (s *Server) handleCreateProblem(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Owner       string `json:"owner"`
+		Repo        string `json:"repo"`
+		Description string `json:"description"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.Description) == "" {
-		http.Error(w, "description is required", http.StatusBadRequest)
+	if req.Owner == "" || req.Repo == "" || strings.TrimSpace(req.Description) == "" {
+		http.Error(w, "owner, repo, and description are required", http.StatusBadRequest)
 		return
 	}
-	task, err := d.Coordinator.StartTask(r.Context(), req.Description)
+	problem, err := s.Coordinator.CreateProblem(r.Context(), req.Owner, req.Repo, req.Description)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(taskToResponse(task, nil))
+	json.NewEncoder(w).Encode(problemToResponse(problem, nil))
 }
 
-func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleShutdown(w http.ResponseWriter, r *http.Request) {
-	if d.shutdown != nil {
-		d.shutdownOnce.Do(func() { close(d.shutdown) })
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (d *Daemon) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	tasks, err := d.Store.ListTasks(r.Context())
+func (s *Server) handleListProblems(w http.ResponseWriter, r *http.Request) {
+	problems, err := s.Store.ListProblems(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	resp := make([]api.TaskResponse, 0)
-	for i := range tasks {
-		resp = append(resp, taskToResponse(&tasks[i], nil))
+	resp := make([]problemResponse, 0, len(problems))
+	for i := range problems {
+		resp = append(resp, problemToResponse(&problems[i], nil))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (d *Daemon) handleGetTask(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleGetProblem(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	task, err := d.Store.GetTask(r.Context(), id)
+	problem, err := s.Store.GetProblem(r.Context(), id)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	chunks, err := d.Store.ListChunksByTask(r.Context(), id)
+	tasks, err := s.Store.ListTasksByProblem(r.Context(), id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(taskToResponse(task, chunks))
+	json.NewEncoder(w).Encode(problemToResponse(problem, tasks))
 }
 
-func taskToResponse(t *store.Task, chunks []store.Chunk) api.TaskResponse {
-	resp := api.TaskResponse{
-		ID:                t.ID,
-		Description:       t.Description,
-		Status:            t.Status,
-		RepoOwner:         t.RepoOwner,
-		RepoName:          t.RepoName,
-		ParentIssueNumber: t.ParentIssueNumber,
-		CreatedAt:         t.CreatedAt,
-		UpdatedAt:         t.UpdatedAt,
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	s.Shutdown()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type problemResponse struct {
+	ID          string         `json:"id"`
+	Description string         `json:"description"`
+	Status      string         `json:"status"`
+	RepoID      string         `json:"repo_id"`
+	IssueNumber int            `json:"issue_number"`
+	Tasks       []taskResponse `json:"tasks,omitempty"`
+}
+
+type taskResponse struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	PRNumber    int    `json:"pr_number,omitempty"`
+}
+
+func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
+	resp := problemResponse{
+		ID:          p.ID,
+		Description: p.Description,
+		Status:      p.Status,
+		RepoID:      p.RepoID,
+		IssueNumber: p.ParentIssueNumber,
 	}
-	for _, c := range chunks {
-		resp.Chunks = append(resp.Chunks, api.ChunkResponse{
-			ID:          c.ID,
-			TaskID:      c.TaskID,
-			Title:       c.Title,
-			Description: c.Description,
-			Status:      c.Status,
-			Branch:      c.Branch,
-			BaseBranch:  c.BaseBranch,
-			IssueNumber: c.IssueNumber,
-			PRNumber:    c.PRNumber,
-			SortOrder:   c.SortOrder,
+	for _, t := range tasks {
+		resp.Tasks = append(resp.Tasks, taskResponse{
+			ID:          t.ID,
+			Title:       t.Title,
+			Description: t.Description,
+			Status:      t.Status,
+			PRNumber:    t.PRNumber,
 		})
 	}
 	return resp
+}
+
+func registerRepos(ctx context.Context, s *store.Store, reg *repo.Registry, cfg *config.Config) error {
+	for _, rc := range cfg.Repos {
+		dir := reg.Dir(rc.Owner, rc.Name)
+		repo, err := reg.Ensure(ctx, rc.Owner, rc.Name, rc.DefaultBranch, cfg.GitHubToken)
+		if err != nil {
+			return fmt.Errorf("ensure repo %s/%s: %w", rc.Owner, rc.Name, err)
+		}
+		existing, err := s.GetRepoByOwnerName(ctx, rc.Owner, rc.Name)
+		if err == nil {
+			existing.LocalDir = repo.Dir
+			existing.DefaultBranch = repo.DefaultBranch
+			if err := s.UpdateRepo(ctx, existing); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := s.CreateRepo(ctx, rc.Owner, rc.Name, dir, rc.DefaultBranch, ""); err != nil {
+			return fmt.Errorf("register repo %s/%s: %w", rc.Owner, rc.Name, err)
+		}
+	}
+	return nil
+}
+
+func dbPath() string {
+	if v := os.Getenv("CTTW_DB"); v != "" {
+		return v
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "cttw", "cttw.db")
+}
+
+func reposRoot() string {
+	if v := os.Getenv("CTTW_REPOS"); v != "" {
+		return v
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "cttw", "repos")
 }

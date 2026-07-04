@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/llin/cttw/internal/coordinator"
+	"github.com/llin/cttw/internal/launcher"
+	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,29 +28,30 @@ func (s *smokeGH) CreatePullRequest(ctx context.Context, owner, repo, title, bod
 	return 1, nil
 }
 
-type smokeLLM struct{}
-
-func (s *smokeLLM) Chat(ctx context.Context, system, user string) (string, error) {
-	return `[{"title":"add test","description":"add a smoke test"}]`, nil
-}
-
-func TestSmoke_CreateTask(t *testing.T) {
+func TestSmoke_CreateProblem(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
 
-	coord := &coordinator.Coordinator{
-		LLM:   &smokeLLM{},
-		GH:    &smokeGH{},
-		Store: s,
-		Owner: "o",
-		Repo:  "r",
-	}
-	task, err := coord.StartTask(context.Background(), "add smoke test")
+	ctx := context.Background()
+	_, err = s.CreateRepo(ctx, "o", "r", "/tmp/r", "main", "")
 	require.NoError(t, err)
-	assert.Equal(t, "add smoke test", task.Description)
 
-	chunks, err := s.ListChunksByTask(context.Background(), task.ID)
+	ml := &launcher.MockLauncher{
+		OnLaunch: func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+			return &launcher.MockAgent{
+				Responses: []string{`[{"title":"add test","description":"add a smoke test"}]`},
+			}, nil
+		},
+	}
+
+	coord := coordinator.New(s, ml, &repo.Registry{Root: "/tmp/repos"}, &smokeGH{})
+	problem, err := coord.CreateProblem(ctx, "o", "r", "add smoke test")
 	require.NoError(t, err)
-	assert.Len(t, chunks, 1)
+	assert.Equal(t, "add smoke test", problem.Description)
+	assert.Equal(t, "ready", problem.Status)
+
+	tasks, err := s.ListTasksByProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	assert.Len(t, tasks, 1)
 }

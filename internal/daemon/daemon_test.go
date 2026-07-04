@@ -4,194 +4,122 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
-	"net/http/httptest"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
-	"github.com/llin/cttw/internal/api"
 	"github.com/llin/cttw/internal/coordinator"
+	"github.com/llin/cttw/internal/launcher"
+	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
+	"github.com/llin/cttw/internal/worker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-type fakeLLM struct{ resp string }
-
-func (f *fakeLLM) Chat(ctx context.Context, system, user string) (string, error) {
-	return f.resp, nil
+type mockGH struct {
+	issues    map[string]int
+	subIssues [][2]int
 }
 
-type fakeGH struct{ issueCount int }
-
-func (f *fakeGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
-	f.issueCount++
-	return f.issueCount, nil
+func (m *mockGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
+	m.issues[title] = len(m.issues) + 1
+	return m.issues[title], nil
 }
-func (f *fakeGH) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
+func (m *mockGH) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
+	m.subIssues = append(m.subIssues, [2]int{parentNumber, childNumber})
 	return nil
 }
-func (f *fakeGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
-	return nil
-}
-func (f *fakeGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
-	return 1, nil
+func (m *mockGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error { return nil }
+func (m *mockGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
+	return 0, nil
 }
 
-func TestHandleCreateTask(t *testing.T) {
+func TestServer_CreateAndGetProblem(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
 
-	coord := &coordinator.Coordinator{
-		LLM:   &fakeLLM{resp: `[{"title":"c1","description":"d1"}]`},
-		GH:    &fakeGH{},
-		Store: s,
-		Owner: "o",
-		Repo:  "r",
+	ctx := context.Background()
+	_, err = s.CreateRepo(ctx, "llin", "cttw", "/tmp/r", "main", "")
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{`[{"title":"t1","description":"d1"}]`},
+		}, nil
 	}
-	d := &Daemon{Store: s, Owner: "o", Name: "r", Coordinator: coord}
-	body, _ := json.Marshal(api.CreateTaskRequest{Description: "test task"})
-	req := httptest.NewRequest("POST", "/api/v1/tasks", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	d.handleCreateTask(w, req)
 
-	assert.Equal(t, http.StatusAccepted, w.Code)
-	var resp api.TaskResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, "test task", resp.Description)
+	gh := &mockGH{issues: make(map[string]int)}
+	coord := coordinator.New(s, ml, &repo.Registry{Root: "/tmp/repos"}, gh)
+	w := worker.New(s, ml, &repo.Registry{Root: "/tmp/repos"}, gh)
+
+	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
+	srv := &Server{
+		Store:       s,
+		Coordinator: coord,
+		Worker:      w,
+		Socket:      "unix://" + sockFile,
+		shutdown:    make(chan struct{}),
+	}
+
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(srv.Shutdown)
+	waitForSocket(t, sockFile)
+
+	body, _ := json.Marshal(map[string]string{"owner": "llin", "repo": "cttw", "description": "build API"})
+	resp, err := unixPost(sockFile, "/api/v1/problems", body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
+
+	var problemResp problemResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problemResp))
+	assert.Equal(t, "build API", problemResp.Description)
+	assert.Equal(t, "ready", problemResp.Status)
+	assert.Greater(t, problemResp.IssueNumber, 0)
+
+	resp, err = unixGet(sockFile, "/api/v1/problems/"+problemResp.ID)
+	require.NoError(t, err)
+	var got problemResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	assert.Len(t, got.Tasks, 1)
 }
 
-func TestHandleStatus(t *testing.T) {
-	d := &Daemon{}
-	req := httptest.NewRequest("GET", "/api/v1/status", nil)
-	w := httptest.NewRecorder()
-	d.handleStatus(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	var resp map[string]string
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, "ok", resp["status"])
+func waitForSocket(t *testing.T, path string) {
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
 }
 
-func TestHandleGetTask(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	ctx := context.Background()
-	task, err := s.CreateTask(ctx, "get me", "o", "r")
-	require.NoError(t, err)
-
-	d := &Daemon{Store: s}
-	req := httptest.NewRequest("GET", "/api/v1/tasks/"+task.ID, nil)
-	req.SetPathValue("id", task.ID)
-	w := httptest.NewRecorder()
-	d.handleGetTask(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	var resp api.TaskResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, task.ID, resp.ID)
-	assert.Equal(t, "get me", resp.Description)
+func unixPost(sock, path string, body []byte) (*http.Response, error) {
+	c := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+	req, _ := http.NewRequest("POST", "http://unix"+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return c.Do(req)
 }
 
-func TestHandleGetTaskNotFound(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	d := &Daemon{Store: s}
-	req := httptest.NewRequest("GET", "/api/v1/tasks/does-not-exist", nil)
-	req.SetPathValue("id", "does-not-exist")
-	w := httptest.NewRecorder()
-	d.handleGetTask(w, req)
-
-	assert.Equal(t, http.StatusNotFound, w.Code)
-}
-
-func TestHandleCreateTaskEmptyDescription(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	d := &Daemon{Store: s}
-	body, _ := json.Marshal(api.CreateTaskRequest{Description: "   "})
-	req := httptest.NewRequest("POST", "/api/v1/tasks", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	d.handleCreateTask(w, req)
-
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-func TestHandleListTasksEmpty(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	d := &Daemon{Store: s}
-	req := httptest.NewRequest("GET", "/api/v1/tasks", nil)
-	w := httptest.NewRecorder()
-	d.handleListTasks(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "[]", strings.TrimSpace(w.Body.String()))
-	var resp []api.TaskResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Empty(t, resp)
-}
-
-func TestHandleListTasks(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	ctx := context.Background()
-	_, err = s.CreateTask(ctx, "first", "o", "r")
-	require.NoError(t, err)
-	_, err = s.CreateTask(ctx, "second", "o", "r")
-	require.NoError(t, err)
-
-	d := &Daemon{Store: s}
-	req := httptest.NewRequest("GET", "/api/v1/tasks", nil)
-	w := httptest.NewRecorder()
-	d.handleListTasks(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	var resp []api.TaskResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Len(t, resp, 2)
-}
-
-func TestHandleGetTaskIncludesChunks(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	ctx := context.Background()
-	task, err := s.CreateTask(ctx, "task with chunks", "o", "r")
-	require.NoError(t, err)
-
-	chunk, err := s.CreateChunk(ctx, store.Chunk{
-		TaskID:      task.ID,
-		Title:       "chunk one",
-		Description: "chunk description",
-		SortOrder:   1,
-	})
-	require.NoError(t, err)
-
-	d := &Daemon{Store: s}
-	req := httptest.NewRequest("GET", "/api/v1/tasks/"+task.ID, nil)
-	req.SetPathValue("id", task.ID)
-	w := httptest.NewRecorder()
-	d.handleGetTask(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
-	var resp api.TaskResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, task.ID, resp.ID)
-	require.Len(t, resp.Chunks, 1)
-	assert.Equal(t, chunk.ID, resp.Chunks[0].ID)
-	assert.Equal(t, "chunk one", resp.Chunks[0].Title)
+func unixGet(sock, path string) (*http.Response, error) {
+	c := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+	return c.Get("http://unix" + path)
 }

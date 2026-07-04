@@ -137,6 +137,16 @@ func (s *Store) CreateRepo(ctx context.Context, owner, name, localDir, defaultBr
 	return r, nil
 }
 
+// UpdateRepo persists changes to an existing repo.
+func (s *Store) UpdateRepo(ctx context.Context, r *Repo) error {
+	r.UpdatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE repos SET owner=?, name=?, local_dir=?, default_branch=?, clone_url=?, updated_at=? WHERE id = ?`,
+		r.Owner, r.Name, r.LocalDir, r.DefaultBranch, r.CloneURL, r.UpdatedAt, r.ID,
+	)
+	return err
+}
+
 // GetRepo retrieves a repo by its ID.
 func (s *Store) GetRepo(ctx context.Context, id string) (*Repo, error) {
 	row := s.db.QueryRowContext(ctx,
