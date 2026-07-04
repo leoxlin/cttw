@@ -35,44 +35,44 @@ func NewClient(socket string) *Client {
 	}
 }
 
-func (c *Client) CreateTask(description string) (*TaskResponse, error) {
-	body, err := json.Marshal(CreateTaskRequest{Description: description})
+func (c *Client) CreateProblem(owner, repo, description string) (*ProblemResponse, error) {
+	body, err := json.Marshal(CreateProblemRequest{Owner: owner, Repo: repo, Description: description})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
-	resp, err := c.post("/api/v1/tasks", body)
+	resp, err := c.post("/api/v1/problems", body)
 	if err != nil {
 		return nil, err
 	}
-	var tr TaskResponse
-	if err := json.Unmarshal(resp, &tr); err != nil {
+	var pr ProblemResponse
+	if err := json.Unmarshal(resp, &pr); err != nil {
 		return nil, err
 	}
-	return &tr, nil
+	return &pr, nil
 }
 
-func (c *Client) ListTasks() ([]TaskResponse, error) {
-	resp, err := c.get("/api/v1/tasks")
+func (c *Client) ListProblems() ([]ProblemResponse, error) {
+	resp, err := c.get("/api/v1/problems")
 	if err != nil {
 		return nil, err
 	}
-	var tasks []TaskResponse
-	if err := json.Unmarshal(resp, &tasks); err != nil {
+	var problems []ProblemResponse
+	if err := json.Unmarshal(resp, &problems); err != nil {
 		return nil, err
 	}
-	return tasks, nil
+	return problems, nil
 }
 
-func (c *Client) GetTask(id string) (*TaskResponse, error) {
-	resp, err := c.get("/api/v1/tasks/" + url.PathEscape(id))
+func (c *Client) GetProblem(id string) (*ProblemResponse, error) {
+	resp, err := c.get("/api/v1/problems/" + url.PathEscape(id))
 	if err != nil {
 		return nil, err
 	}
-	var tr TaskResponse
-	if err := json.Unmarshal(resp, &tr); err != nil {
+	var pr ProblemResponse
+	if err := json.Unmarshal(resp, &pr); err != nil {
 		return nil, err
 	}
-	return &tr, nil
+	return &pr, nil
 }
 
 func (c *Client) Shutdown() error {
