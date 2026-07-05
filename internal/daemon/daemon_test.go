@@ -58,8 +58,8 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 
 	gh := &mockGH{issues: make(map[string]int)}
 	regRoot := filepath.Join(t.TempDir(), "repos")
-	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh)
-	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh)
+	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{

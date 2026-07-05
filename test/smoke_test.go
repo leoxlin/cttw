@@ -57,8 +57,8 @@ func TestIntegration_FakeACPAgent(t *testing.T) {
 	reg := &repo.Registry{Root: filepath.Join(dir, "repos")}
 	ln := launcher.NewCodexLauncher(cfg)
 	gh := &smokeGH{}
-	coord := coordinator.New(s, ln, reg, gh)
-	w := worker.New(s, ln, reg, gh)
+	coord := coordinator.New(s, ln, reg, gh, "codex")
+	w := worker.New(s, ln, reg, gh, "codex")
 
 	problem, err := coord.CreateProblem(ctx, "o", "r", "add smoke test")
 	require.NoError(t, err)

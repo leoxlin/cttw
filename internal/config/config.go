@@ -91,10 +91,6 @@ func validate(cfg *Config) error {
 		if backend.Command == "" {
 			return fmt.Errorf("local backend %q requires command", cfg.Agent.DefaultBackend)
 		}
-	case "remote":
-		if backend.URL == "" {
-			return fmt.Errorf("remote backend %q requires url", cfg.Agent.DefaultBackend)
-		}
 	default:
 		return fmt.Errorf("backend %q has unsupported type %q", cfg.Agent.DefaultBackend, backend.Type)
 	}

@@ -18,6 +18,7 @@ type Handler interface {
 	HandleWaitForTerminalExit(ctx context.Context, req WaitForTerminalExitRequest) (*WaitForTerminalExitResponse, error)
 	HandleReleaseTerminal(ctx context.Context, req ReleaseTerminalRequest) error
 	HandleRequestPermission(ctx context.Context, req RequestPermissionRequest) (*RequestPermissionResponse, error)
+	HandleNotification(ctx context.Context, method string, params json.RawMessage) error
 }
 
 // Client is an ACP JSON-RPC client over a Transport.
@@ -77,6 +78,16 @@ func (c *Client) Start(ctx context.Context) error {
 			if err := c.handleRequest(ctx, env); err != nil {
 				// Log or surface? For now best-effort response.
 				_ = c.sendError(ctx, env.ID, -32000, err.Error())
+			}
+			continue
+		}
+		if env.ID == nil && env.Method != "" {
+			// Notification; dispatch to handler without responding.
+			c.mu.Lock()
+			h := c.handler
+			c.mu.Unlock()
+			if h != nil {
+				_ = h.HandleNotification(ctx, env.Method, env.Params)
 			}
 			continue
 		}

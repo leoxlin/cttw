@@ -52,8 +52,8 @@ func Run() error {
 	}
 
 	ln := launcher.NewCodexLauncher(cfg)
-	coord := coordinator.New(s, ln, reg, gh)
-	w := worker.New(s, ln, reg, gh)
+	coord := coordinator.New(s, ln, reg, gh, cfg.Agent.DefaultBackend)
+	w := worker.New(s, ln, reg, gh, cfg.Agent.DefaultBackend)
 
 	srv := &Server{
 		Store:       s,
@@ -69,6 +69,9 @@ func (s *Server) run() error {
 	defer s.Store.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if err := s.Store.ResetRunningTasks(ctx); err != nil {
+		return fmt.Errorf("reset running tasks: %w", err)
+	}
 	go s.workerLoop(ctx)
 	return s.Serve()
 }
@@ -162,6 +165,10 @@ func (s *Server) handleCreateProblem(w http.ResponseWriter, r *http.Request) {
 	}
 	problem, err := s.Coordinator.CreateProblem(r.Context(), req.Owner, req.Repo, req.Description)
 	if err != nil {
+		if errors.Is(err, coordinator.ErrRepoNotRegistered) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

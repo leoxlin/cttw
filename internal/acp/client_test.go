@@ -44,6 +44,10 @@ func (m *mockHandler) HandleRequestPermission(ctx context.Context, req RequestPe
 	return &RequestPermissionResponse{Outcome: PermissionOutcome{Outcome: "allowed"}}, nil
 }
 
+func (m *mockHandler) HandleNotification(ctx context.Context, method string, params json.RawMessage) error {
+	return nil
+}
+
 func TestClient_InitializeAndPrompt(t *testing.T) {
 	inReader, inWriter := io.Pipe()
 	outReader, outWriter := io.Pipe()

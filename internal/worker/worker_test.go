@@ -29,7 +29,7 @@ func TestWorker_ExecuteTask(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
-	r, err := s.CreateRepo(ctx, "llin", "cttw", "/tmp/r", "main", "")
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
@@ -44,7 +44,7 @@ func TestWorker_ExecuteTask(t *testing.T) {
 	}
 
 	gh := &mockGH{}
-	w := New(s, ml, &repo.Registry{Root: "/tmp/repos"}, gh)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex")
 	require.NoError(t, w.ExecuteTask(ctx, task))
 
 	got, err := s.GetTask(ctx, task.ID)

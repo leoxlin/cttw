@@ -13,6 +13,7 @@ type MockAgent struct {
 	mu              sync.Mutex
 	Initialized     bool
 	SessionCreated  bool
+	SessionIDValue  string
 	Closed          bool
 	PromptsReceived []string
 	Responses       []string
@@ -30,7 +31,16 @@ func (m *MockAgent) NewSession(ctx context.Context, req acp.NewSessionRequest) e
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.SessionCreated = true
+	if m.SessionIDValue == "" {
+		m.SessionIDValue = "mock-session"
+	}
 	return nil
+}
+
+func (m *MockAgent) SessionID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.SessionIDValue
 }
 
 func (m *MockAgent) Prompt(ctx context.Context, prompt string) (*acp.PromptResponse, error) {

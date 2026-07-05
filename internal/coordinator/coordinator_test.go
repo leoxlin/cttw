@@ -41,7 +41,7 @@ func TestCoordinator_CreateProblem(t *testing.T) {
 
 	// Seed repo record.
 	ctx := context.Background()
-	r, err := s.CreateRepo(ctx, "llin", "cttw", "/tmp/r", "main", "")
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
 	require.NoError(t, err)
 
 	ml := &launcher.MockLauncher{}
@@ -51,7 +51,7 @@ func TestCoordinator_CreateProblem(t *testing.T) {
 		}, nil
 	}
 
-	coord := New(s, ml, &repo.Registry{Root: "/tmp/repos"}, &mockGitHub{issues: make(map[string]int)})
+	coord := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGitHub{issues: make(map[string]int)}, "codex")
 	problem, err := coord.CreateProblem(ctx, "llin", "cttw", "build the API")
 	require.NoError(t, err)
 	assert.Equal(t, "ready", problem.Status)

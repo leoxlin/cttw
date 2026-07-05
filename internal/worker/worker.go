@@ -18,10 +18,14 @@ type Worker struct {
 	launcher launcher.Launcher
 	repos    *repo.Registry
 	gh       github.Client
+	backend  string
 }
 
-func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client) *Worker {
-	return &Worker{store: store, launcher: launcher, repos: repos, gh: gh}
+func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string) *Worker {
+	if backend == "" {
+		backend = "codex"
+	}
+	return &Worker{store: store, launcher: launcher, repos: repos, gh: gh, backend: backend}
 }
 
 func (w *Worker) RunOnce(ctx context.Context) error {
@@ -33,9 +37,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		return nil
 	}
 	if err := w.ExecuteTask(ctx, task); err != nil {
-		task.Status = "failed"
 		task.Output = err.Error()
 		task.Attempts++
+		if task.Attempts < task.MaxAttempts {
+			task.Status = "pending"
+		} else {
+			task.Status = "failed"
+		}
 		_ = w.store.UpdateTask(ctx, task)
 		return err
 	}
@@ -59,7 +67,7 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	}
 
 	agent, err := w.launcher.Launch(ctx, launcher.LaunchSpec{
-		Backend: "codex",
+		Backend: w.backend,
 		Repo:    launcher.RepoContext{Owner: r.Owner, Name: r.Name, DefaultBranch: r.DefaultBranch, LocalDir: r.LocalDir},
 		Task: launcher.TaskContext{
 			ProblemDescription: problem.Description,
@@ -79,6 +87,7 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	if err := agent.NewSession(ctx, acp.NewSessionRequest{CWD: r.LocalDir}); err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
+	task.AgentSessionID = agent.SessionID()
 
 	prompt := fmt.Sprintf(`You are a software engineer. Implement the following task in the repository.
 
@@ -128,17 +137,48 @@ type taskResult struct {
 	Error    string `json:"error"`
 }
 
+type span struct {
+	Start int
+	End   int
+}
+
+// findOutermost returns the indices of the outermost balanced open/close pair,
+// or {-1, -1} if none exists.
+func findOutermost(s string, open, close byte) span {
+	depth := 0
+	start := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == open {
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		} else if s[i] == close {
+			if depth > 0 {
+				depth--
+				if depth == 0 {
+					return span{Start: start, End: i}
+				}
+			}
+		}
+	}
+	return span{Start: -1, End: -1}
+}
+
 func parseTaskResult(content string) (taskResult, error) {
 	content = strings.TrimSpace(content)
-	if idx := strings.Index(content, "{"); idx > 0 {
-		content = content[idx:]
-	}
-	if idx := strings.LastIndex(content, "}"); idx > 0 {
-		content = content[:idx+1]
+	span := findOutermost(content, '{', '}')
+	if span.Start < 0 {
+		return taskResult{}, fmt.Errorf("no JSON object found in response")
 	}
 	var out taskResult
-	if err := json.Unmarshal([]byte(content), &out); err != nil {
+	if err := json.Unmarshal([]byte(content[span.Start:span.End+1]), &out); err != nil {
 		return taskResult{}, err
+	}
+	switch out.Status {
+	case "completed", "failed":
+	default:
+		return taskResult{}, fmt.Errorf("unrecognized task status %q", out.Status)
 	}
 	return out, nil
 }

@@ -2,7 +2,9 @@ package coordinator
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -13,22 +15,32 @@ import (
 	"github.com/llin/cttw/internal/store"
 )
 
+// ErrRepoNotRegistered is returned when a requested repo has not been registered.
+var ErrRepoNotRegistered = errors.New("repo not registered")
+
 type Coordinator struct {
 	store    *store.Store
 	launcher launcher.Launcher
 	repos    *repo.Registry
 	gh       github.Client
+	backend  string
 }
 
-func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client) *Coordinator {
-	return &Coordinator{store: store, launcher: launcher, repos: repos, gh: gh}
+func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string) *Coordinator {
+	if backend == "" {
+		backend = "codex"
+	}
+	return &Coordinator{store: store, launcher: launcher, repos: repos, gh: gh, backend: backend}
 }
 
 func (c *Coordinator) CreateProblem(ctx context.Context, owner, name, description string) (*store.Problem, error) {
 	// Ensure repo is registered locally.
 	r, err := c.store.GetRepoByOwnerName(ctx, owner, name)
 	if err != nil {
-		return nil, fmt.Errorf("repo not registered: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrRepoNotRegistered
+		}
+		return nil, err
 	}
 
 	// Create parent problem record.
@@ -49,7 +61,7 @@ func (c *Coordinator) CreateProblem(ctx context.Context, owner, name, descriptio
 
 	// Launch coordinator agent.
 	agent, err := c.launcher.Launch(ctx, launcher.LaunchSpec{
-		Backend: "codex",
+		Backend: c.backend,
 		Repo:    launcher.RepoContext{Owner: owner, Name: name, DefaultBranch: r.DefaultBranch, LocalDir: r.LocalDir},
 		Task:    launcher.TaskContext{ProblemDescription: description},
 	})
@@ -119,15 +131,49 @@ type taskSpec struct {
 
 func parseTasks(content string) ([]taskSpec, error) {
 	content = strings.TrimSpace(content)
-	if idx := strings.Index(content, "["); idx > 0 {
-		content = content[idx:]
-	}
-	if idx := strings.LastIndex(content, "]"); idx > 0 {
-		content = content[:idx+1]
+	start := findOutermost(content, '[', ']')
+	if start.Start < 0 {
+		return nil, fmt.Errorf("no JSON array found in response")
 	}
 	var tasks []taskSpec
-	if err := json.Unmarshal([]byte(content), &tasks); err != nil {
+	if err := json.Unmarshal([]byte(content[start.Start:start.End+1]), &tasks); err != nil {
 		return nil, err
 	}
+	for i, t := range tasks {
+		if strings.TrimSpace(t.Title) == "" {
+			return nil, fmt.Errorf("task %d has empty title", i)
+		}
+		if strings.TrimSpace(t.Description) == "" {
+			return nil, fmt.Errorf("task %d has empty description", i)
+		}
+	}
 	return tasks, nil
+}
+
+type span struct {
+	Start int
+	End   int
+}
+
+// findOutermost returns the indices of the outermost balanced open/close pair,
+// or -1 if none exists.
+func findOutermost(s string, open, close byte) span {
+	depth := 0
+	start := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == open {
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		} else if s[i] == close {
+			if depth > 0 {
+				depth--
+				if depth == 0 {
+					return span{Start: start, End: i}
+				}
+			}
+		}
+	}
+	return span{Start: -1, End: -1}
 }

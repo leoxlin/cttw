@@ -33,6 +33,7 @@ type TaskContext struct {
 type Agent interface {
 	Initialize(ctx context.Context) error
 	NewSession(ctx context.Context, req acp.NewSessionRequest) error
+	SessionID() string
 	Prompt(ctx context.Context, prompt string) (*acp.PromptResponse, error)
 	Close(ctx context.Context) error
 }
