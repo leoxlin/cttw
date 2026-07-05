@@ -110,9 +110,6 @@ func validate(cfg *Config) error {
 	if cfg.GitHubToken == "" {
 		return fmt.Errorf("github_token is required")
 	}
-	if len(cfg.Repos) == 0 {
-		return fmt.Errorf("at least one repo is required")
-	}
 	for i, r := range cfg.Repos {
 		if r.Owner == "" || r.Name == "" {
 			return fmt.Errorf("repo %d must have owner and name", i)

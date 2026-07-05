@@ -111,6 +111,35 @@ func TestFailTasksByProblem(t *testing.T) {
 	assert.Equal(t, "failed", got2.Status)
 }
 
+func TestNextPendingTaskForRepo(t *testing.T) {
+	s, err := New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	ctx := context.Background()
+
+	r1, _ := s.CreateRepo(ctx, "o1", "r1", "/tmp/r1", "main", "")
+	r2, _ := s.CreateRepo(ctx, "o2", "r2", "/tmp/r2", "main", "")
+	p1, _ := s.CreateProblem(ctx, "x", r1.ID)
+	p2, _ := s.CreateProblem(ctx, "y", r2.ID)
+	_, _ = s.CreateTask(ctx, p1.ID, r1.ID, "t1", "d1")
+	t2, _ := s.CreateTask(ctx, p2.ID, r2.ID, "t2", "d2")
+
+	got, err := s.NextPendingTaskForRepo(ctx, r2.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, t2.ID, got.ID)
+	assert.Equal(t, "running", got.Status)
+
+	again, err := s.NextPendingTaskForRepo(ctx, r2.ID)
+	require.NoError(t, err)
+	assert.Nil(t, again)
+
+	tasks, err := s.ListTasksByProblem(ctx, p1.ID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "pending", tasks[0].Status)
+}
+
 func TestNextPendingTask(t *testing.T) {
 	s, err := New(":memory:")
 	require.NoError(t, err)

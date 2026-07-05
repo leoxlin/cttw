@@ -72,10 +72,10 @@ command = "codex-acp"
 	assert.Equal(t, "unix:///var/run/cttw.sock", cfg.DaemonSocket)
 }
 
-func TestLoad_RepoRequired(t *testing.T) {
-	_, err := Load("", map[string]string{"GITHUB_TOKEN": "tok"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at least one repo")
+func TestLoad_NoRepoAllowed(t *testing.T) {
+	cfg, err := Load("", map[string]string{"GITHUB_TOKEN": "tok"})
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Repos)
 }
 
 func TestLoad_BackendMustExist(t *testing.T) {

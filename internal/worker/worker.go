@@ -58,6 +58,31 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	return nil
 }
 
+// RunOnceForRepo picks and executes the next pending task for a single repo.
+func (w *Worker) RunOnceForRepo(ctx context.Context, repoID string) error {
+	task, err := w.store.NextPendingTaskForRepo(ctx, repoID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return nil
+	}
+	if err := w.ExecuteTask(ctx, task); err != nil {
+		task.Output = err.Error()
+		task.Attempts++
+		if task.Attempts < task.MaxAttempts {
+			task.Status = "pending"
+		} else {
+			task.Status = "failed"
+		}
+		if updateErr := w.store.UpdateTask(ctx, task); updateErr != nil {
+			return fmt.Errorf("execute task: %w; update task state: %w", err, updateErr)
+		}
+		return err
+	}
+	return nil
+}
+
 func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	task.Status = "running"
 	if err := w.store.UpdateTask(ctx, task); err != nil {

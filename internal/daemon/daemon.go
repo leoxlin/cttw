@@ -50,13 +50,12 @@ func Run() error {
 
 	gh := github.New(cfg.GitHubToken, nil)
 	reg := &repo.Registry{Root: reposRoot()}
-	if err := registerRepos(context.Background(), s, reg, cfg); err != nil {
-		s.Close()
-		return fmt.Errorf("register repos: %w", err)
-	}
 
 	ln := launcher.NewCodexLauncher(cfg)
-	coord := coordinator.New(s, ln, reg, gh, cfg.Agent.DefaultBackend, cfg.Agent.PromptTimeoutDuration())
+	coord := coordinator.New(s, ln, reg, gh, cfg.Agent.DefaultBackend, cfg.Agent.PromptTimeoutDuration(),
+		coordinator.WithToken(cfg.GitHubToken),
+		coordinator.WithRepoConfigs(cfg.Repos),
+	)
 	w := worker.New(s, ln, reg, gh, cfg.Agent.DefaultBackend, cfg.Agent.PromptTimeoutDuration())
 
 	srv := &Server{
@@ -101,8 +100,15 @@ func (s *Server) workerLoop(ctx context.Context) {
 		case <-s.shutdown:
 			return
 		case <-ticker.C:
-			if err := s.Worker.RunOnce(ctx); err != nil {
-				log.Printf("worker run: %v", err)
+			repos, err := s.Store.ListRepos(ctx)
+			if err != nil {
+				log.Printf("list repos for worker: %v", err)
+				continue
+			}
+			for _, r := range repos {
+				if err := s.Worker.RunOnceForRepo(ctx, r.ID); err != nil {
+					log.Printf("worker run %s/%s: %v", r.Owner, r.Name, err)
+				}
 			}
 		}
 	}
@@ -280,32 +286,6 @@ func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
 		})
 	}
 	return resp
-}
-
-func registerRepos(ctx context.Context, s *store.Store, reg *repo.Registry, cfg *config.Config) error {
-	for _, rc := range cfg.Repos {
-		dir := reg.Dir(rc.Owner, rc.Name)
-		repo, err := reg.Ensure(ctx, rc.Owner, rc.Name, rc.DefaultBranch, cfg.GitHubToken)
-		if err != nil {
-			return fmt.Errorf("ensure repo %s/%s: %w", rc.Owner, rc.Name, err)
-		}
-		existing, err := s.GetRepoByOwnerName(ctx, rc.Owner, rc.Name)
-		if err == nil {
-			existing.LocalDir = repo.Dir
-			existing.DefaultBranch = repo.DefaultBranch
-			if err := s.UpdateRepo(ctx, existing); err != nil {
-				return fmt.Errorf("update repo %s/%s: %w", rc.Owner, rc.Name, err)
-			}
-			continue
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("lookup repo %s/%s: %w", rc.Owner, rc.Name, err)
-		}
-		if _, err := s.CreateRepo(ctx, rc.Owner, rc.Name, dir, rc.DefaultBranch, ""); err != nil {
-			return fmt.Errorf("register repo %s/%s: %w", rc.Owner, rc.Name, err)
-		}
-	}
-	return nil
 }
 
 func dbPath() string {

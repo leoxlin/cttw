@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llin/cttw/internal/config"
 	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
@@ -42,6 +43,18 @@ func (m *mockGitHub) CreatePullRequest(ctx context.Context, owner, repo, title, 
 }
 func (m *mockGitHub) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
 	return nil, nil
+}
+
+type mockRepoRegistry struct {
+	dir string
+}
+
+func (m *mockRepoRegistry) Ensure(ctx context.Context, owner, name, defaultBranch, token string) (*repo.Repo, error) {
+	branch := defaultBranch
+	if branch == "" {
+		branch = "main"
+	}
+	return &repo.Repo{Owner: owner, Name: name, Dir: m.dir, DefaultBranch: branch}, nil
 }
 
 func waitForProblemStatus(t *testing.T, ctx context.Context, s *store.Store, id, want string) *store.Problem {
@@ -259,6 +272,65 @@ func TestCoordinator_CreateProblem_MarksFailedOnUpdateAfterIssueCreation(t *test
 
 	problem = waitForProblemStatus(t, ctx, s, problem.ID, "failed")
 	assert.Greater(t, problem.ParentIssueNumber, 0)
+}
+
+func TestCoordinator_CreateProblem_LazyRegistration(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+	}
+
+	reg := &mockRepoRegistry{dir: t.TempDir()}
+	coord := New(s, ml, reg, &mockGitHub{issues: make(map[string]int)}, "codex", time.Minute, WithToken("tok"))
+
+	problem, err := coord.CreateProblem(ctx, "llin", "cttw", "build the API")
+	require.NoError(t, err)
+	assert.Equal(t, "pending", problem.Status)
+
+	r, err := s.GetRepoByOwnerName(ctx, "llin", "cttw")
+	require.NoError(t, err)
+	assert.Equal(t, "main", r.DefaultBranch)
+
+	problem = waitForProblemStatus(t, ctx, s, problem.ID, "ready")
+	tasks, err := s.ListTasksByProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, r.ID, tasks[0].RepoID)
+}
+
+func TestCoordinator_CreateProblem_LazyRegistrationUsesConfiguredBranch(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+	}
+
+	reg := &mockRepoRegistry{dir: t.TempDir()}
+	configs := []config.RepoConfig{{Owner: "llin", Name: "cttw", DefaultBranch: "dev"}}
+	coord := New(s, ml, reg, &mockGitHub{issues: make(map[string]int)}, "codex", time.Minute, WithToken("tok"), WithRepoConfigs(configs))
+
+	problem, err := coord.CreateProblem(ctx, "llin", "cttw", "build the API")
+	require.NoError(t, err)
+	assert.Equal(t, "pending", problem.Status)
+
+	r, err := s.GetRepoByOwnerName(ctx, "llin", "cttw")
+	require.NoError(t, err)
+	assert.Equal(t, "dev", r.DefaultBranch)
+
+	problem = waitForProblemStatus(t, ctx, s, problem.ID, "ready")
+	tasks, err := s.ListTasksByProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, r.ID, tasks[0].RepoID)
 }
 
 func TestCoordinator_CreateProblem_MarksFailedOnTaskUpdateAfterChildIssueCreation(t *testing.T) {

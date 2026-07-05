@@ -42,6 +42,18 @@ func (m *mockGH) GetPullRequest(ctx context.Context, owner, repo string, number 
 	return nil, nil
 }
 
+type mockRegistry struct {
+	dir string
+}
+
+func (m *mockRegistry) Ensure(ctx context.Context, owner, name, defaultBranch, token string) (*repo.Repo, error) {
+	branch := defaultBranch
+	if branch == "" {
+		branch = "main"
+	}
+	return &repo.Repo{Owner: owner, Name: name, Dir: m.dir, DefaultBranch: branch}, nil
+}
+
 func TestServer_ShutdownWaitsForWorkerLoop(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
@@ -177,16 +189,19 @@ func TestServer_CreateProblem_AcceptsAsync(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
-func TestServer_CreateProblem_MapsRepoErrorTo400(t *testing.T) {
+func TestServer_CreateProblem_LazyRegistersRepo(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
 
 	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+	}
 	gh := &mockGH{issues: make(map[string]int)}
-	regRoot := filepath.Join(t.TempDir(), "repos")
-	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
-	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
+	reg := &mockRegistry{dir: t.TempDir()}
+	coord := coordinator.New(s, ml, reg, gh, "codex", time.Minute, coordinator.WithToken("tok"))
+	w := worker.New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -204,7 +219,23 @@ func TestServer_CreateProblem_MapsRepoErrorTo400(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{"owner": "llin", "repo": "cttw", "description": "build API"})
 	resp, err := unixPost(sockFile, "/api/v1/problems", body)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
+
+	var problemResp problemResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problemResp))
+
+	ctx := context.Background()
+	require.Eventually(t, func() bool {
+		p, err := s.GetProblem(ctx, problemResp.ID)
+		if err != nil {
+			return false
+		}
+		return p.Status == "ready"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	r, err := s.GetRepoByOwnerName(ctx, "llin", "cttw")
+	require.NoError(t, err)
+	assert.Equal(t, "main", r.DefaultBranch)
 }
 
 func TestServer_CreateAndGetProblem(t *testing.T) {

@@ -478,6 +478,29 @@ func (s *Store) NextPendingTask(ctx context.Context) (*Task, error) {
 	return t, nil
 }
 
+// NextPendingTaskForRepo selects the oldest pending task for a specific repo,
+// atomically marks it as running, and returns it.
+func (s *Store) NextPendingTaskForRepo(ctx context.Context, repoID string) (*Task, error) {
+	row := s.db.QueryRowContext(ctx,
+		`WITH next AS (
+			SELECT id FROM tasks
+			WHERE status = 'pending' AND attempts < max_attempts AND repo_id = ?
+			ORDER BY created_at LIMIT 1
+		)
+		UPDATE tasks SET status = 'running', updated_at = ?
+		WHERE id = (SELECT id FROM next) AND status = 'pending'
+		RETURNING id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at`,
+		repoID, time.Now().UTC())
+	t, err := scanTask(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
 // ResetRunningTasks resets tasks that were running at startup to pending so they
 // can be retried after a crash or unclean shutdown.
 func (s *Store) ResetRunningTasks(ctx context.Context) error {

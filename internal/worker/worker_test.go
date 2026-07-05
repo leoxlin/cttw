@@ -238,6 +238,39 @@ func TestWorker_ExecuteTask_FailsWhenPullRequestVerificationFails(t *testing.T) 
 	assert.Equal(t, 42, gh.getPRCalledFor)
 }
 
+func TestWorker_RunOnceForRepo(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	r1, _ := s.CreateRepo(ctx, "o1", "r1", t.TempDir(), "main", "")
+	r2, _ := s.CreateRepo(ctx, "o2", "r2", t.TempDir(), "main", "")
+	p1, _ := s.CreateProblem(ctx, "x", r1.ID)
+	p2, _ := s.CreateProblem(ctx, "y", r2.ID)
+	_, _ = s.CreateTask(ctx, p1.ID, r1.ID, "t1", "d1")
+	t2, _ := s.CreateTask(ctx, p2.ID, r2.ID, "t2", "d2")
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{Responses: []string{`{"status":"completed","pr_number":42,"branch":"feat/t2"}`}}, nil
+	}
+	gh := &mockGH{getPRBranch: "feat/t2"}
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+
+	require.NoError(t, w.RunOnceForRepo(ctx, r2.ID))
+
+	got, err := s.GetTask(ctx, t2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", got.Status)
+	assert.Equal(t, 42, got.PRNumber)
+
+	tasks, err := s.ListTasksByProblem(ctx, p1.ID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "pending", tasks[0].Status)
+}
+
 func TestWorker_ExecuteTask_FailsWhenBranchMismatch(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)

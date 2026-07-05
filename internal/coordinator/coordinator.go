@@ -12,12 +12,40 @@ import (
 	"time"
 
 	"github.com/llin/cttw/internal/acp"
+	"github.com/llin/cttw/internal/config"
 	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/jsonutil"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
 )
+
+// RepoRegistry abstracts the local git registry so tests can avoid real clones.
+type RepoRegistry interface {
+	Ensure(ctx context.Context, owner, name, defaultBranch, token string) (*repo.Repo, error)
+}
+
+// Option configures a Coordinator.
+type Option func(*Coordinator)
+
+// WithToken provides the GitHub token used when lazily cloning repos.
+func WithToken(token string) Option {
+	return func(c *Coordinator) { c.token = token }
+}
+
+// WithRepoConfigs records configured default branches for repos.
+func WithRepoConfigs(configs []config.RepoConfig) Option {
+	return func(c *Coordinator) {
+		for _, rc := range configs {
+			key := rc.Owner + "/" + rc.Name
+			branch := rc.DefaultBranch
+			if branch == "" {
+				branch = "main"
+			}
+			c.repoBranches[key] = branch
+		}
+	}
+}
 
 // Sentinel errors for classes of problems that are client or configuration
 // errors rather than internal server bugs.
@@ -33,21 +61,42 @@ var (
 type Coordinator struct {
 	store         *store.Store
 	launcher      launcher.Launcher
-	repos         *repo.Registry
+	repos         RepoRegistry
 	gh            github.Client
 	backend       string
 	promptTimeout time.Duration
+	token         string
+	repoBranches  map[string]string
 	wg            sync.WaitGroup
 }
 
-func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string, promptTimeout time.Duration) *Coordinator {
+func New(store *store.Store, launcher launcher.Launcher, repos RepoRegistry, gh github.Client, backend string, promptTimeout time.Duration, opts ...Option) *Coordinator {
 	if backend == "" {
 		backend = "codex"
 	}
 	if promptTimeout <= 0 {
 		promptTimeout = 15 * time.Minute
 	}
-	return &Coordinator{store: store, launcher: launcher, repos: repos, gh: gh, backend: backend, promptTimeout: promptTimeout}
+	c := &Coordinator{
+		store:         store,
+		launcher:      launcher,
+		repos:         repos,
+		gh:            gh,
+		backend:       backend,
+		promptTimeout: promptTimeout,
+		repoBranches:  make(map[string]string),
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+func (c *Coordinator) defaultBranch(owner, name string) string {
+	if b, ok := c.repoBranches[owner+"/"+name]; ok {
+		return b
+	}
+	return "main"
 }
 
 // Wait blocks until all in-flight problem decomposition goroutines finish.
@@ -59,10 +108,27 @@ func (c *Coordinator) CreateProblem(ctx context.Context, owner, name, descriptio
 	// Ensure repo is registered locally.
 	r, err := c.store.GetRepoByOwnerName(ctx, owner, name)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrRepoNotRegistered
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
 		}
-		return nil, err
+
+		branch := c.defaultBranch(owner, name)
+		localRepo, ensureErr := c.repos.Ensure(ctx, owner, name, branch, c.token)
+		if ensureErr != nil {
+			return nil, fmt.Errorf("ensure repo %s/%s: %w", owner, name, ensureErr)
+		}
+
+		created, createErr := c.store.CreateRepo(ctx, owner, name, localRepo.Dir, localRepo.DefaultBranch, "")
+		if createErr != nil {
+			// The unique (owner, name) constraint may race with another
+			// concurrent registration. Re-query once before failing.
+			r, err = c.store.GetRepoByOwnerName(ctx, owner, name)
+			if err != nil {
+				return nil, fmt.Errorf("create repo %s/%s: %w", owner, name, createErr)
+			}
+		} else {
+			r = created
+		}
 	}
 
 	// Create parent problem record.
