@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -125,6 +126,36 @@ func TestWorker_RunOnce_AttemptCountAfterFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, got.Attempts)
 	assert.Equal(t, "failed", got.Status)
+}
+
+func TestWorker_RunOnce_ReturnsUpdateError(t *testing.T) {
+	errUpdate := errors.New("update task failed")
+	s, err := store.New(":memory:", store.WithUpdateTaskError(errUpdate))
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	_, err = s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{`{"status":"failed","error":"not today"}`},
+		}, nil
+	}
+
+	gh := &mockGH{}
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+
+	err = w.RunOnce(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errUpdate)
+	assert.Contains(t, err.Error(), "execute task")
 }
 
 func TestWorker_RunOnce_MissingCompletedFields(t *testing.T) {

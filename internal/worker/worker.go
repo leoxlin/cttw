@@ -50,7 +50,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		} else {
 			task.Status = "failed"
 		}
-		_ = w.store.UpdateTask(ctx, task)
+		if updateErr := w.store.UpdateTask(ctx, task); updateErr != nil {
+			return fmt.Errorf("execute task: %w; update task state: %w", err, updateErr)
+		}
 		return err
 	}
 	return nil
@@ -87,10 +89,12 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	}
 	defer agent.Close(ctx)
 
-	if err := agent.Initialize(ctx); err != nil {
+	setupCtx, cancel := context.WithTimeout(ctx, w.promptTimeout)
+	defer cancel()
+	if err := agent.Initialize(setupCtx); err != nil {
 		return fmt.Errorf("initialize agent: %w", err)
 	}
-	if err := agent.NewSession(ctx, acp.NewSessionRequest{CWD: r.LocalDir}); err != nil {
+	if err := agent.NewSession(setupCtx, acp.NewSessionRequest{CWD: r.LocalDir}); err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
 	task.AgentSessionID = agent.SessionID()

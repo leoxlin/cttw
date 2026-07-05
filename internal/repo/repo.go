@@ -33,20 +33,24 @@ func (r *Registry) Ensure(ctx context.Context, owner, name, defaultBranch, token
 	dir := r.Dir(owner, name)
 	gitDir := filepath.Join(dir, ".git")
 
+	var runner *gitexec.Runner
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			return nil, fmt.Errorf("create repo parent dir: %w", err)
 		}
 		cloneURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, name)
-		if err := (&gitexec.Runner{}).Clone(cloneURL, token, dir); err != nil {
+		runner = &gitexec.Runner{}
+		if err := runner.Clone(cloneURL, token, dir); err != nil {
 			return nil, fmt.Errorf("clone repo: %w", err)
 		}
 	} else if err != nil {
 		return nil, fmt.Errorf("stat repo dir: %w", err)
+	} else {
+		runner = &gitexec.Runner{Dir: dir, Token: token}
 	}
 
 	// Verify the existing directory is actually the requested repository.
-	remote, err := (&gitexec.Runner{Dir: dir}).Output("config", "--get", "remote.origin.url")
+	remote, err := runner.Output("config", "--get", "remote.origin.url")
 	if err != nil {
 		return nil, fmt.Errorf("read remote origin url: %w", err)
 	}
@@ -55,7 +59,7 @@ func (r *Registry) Ensure(ctx context.Context, owner, name, defaultBranch, token
 	}
 
 	// Keep remote refs up to date; do not touch the working tree.
-	if err := (&gitexec.Runner{Dir: dir}).Run("remote", "update"); err != nil {
+	if err := runner.Run("remote", "update"); err != nil {
 		return nil, fmt.Errorf("remote update: %w", err)
 	}
 

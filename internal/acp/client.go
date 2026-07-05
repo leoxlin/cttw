@@ -105,9 +105,9 @@ func (c *Client) isClosed() bool {
 
 func (c *Client) routeResponse(env Envelope) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	var id int64
 	if err := json.Unmarshal(env.ID, &id); err != nil {
+		c.mu.Unlock()
 		select {
 		case c.errCh <- fmt.Errorf("acp: malformed response id: %w", err):
 		default:
@@ -116,14 +116,18 @@ func (c *Client) routeResponse(env Envelope) {
 	}
 	ch, ok := c.pending[id]
 	if !ok {
+		c.mu.Unlock()
 		select {
 		case c.errCh <- fmt.Errorf("acp: unmatched response id %d", id):
 		default:
 		}
 		return
 	}
+	c.mu.Unlock()
+
 	select {
 	case ch <- env:
+	case <-c.closeCh:
 	default:
 	}
 }

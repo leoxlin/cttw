@@ -54,9 +54,17 @@ func TestRunner_Clone_DoesNotEmbedToken(t *testing.T) {
 	assert.Equal(t, "file://"+bare, strings.TrimSpace(string(remoteURL)))
 	assert.NotContains(t, string(remoteURL), token)
 
-	// The auth header should be configured for github.com.
-	header, err := (&Runner{Dir: cloneDir}).Output("config", "--get", "http.https://github.com/.extraHeader")
-	require.NoError(t, err)
+	// The auth header must NOT be persisted in the cloned repo's local config.
+	_, err = (&Runner{Dir: cloneDir}).Output("config", "--get", "http.https://github.com/.extraHeader")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exit status 1")
+
+	// The runner must still carry the token and use it per-invocation.
+	assert.Equal(t, token, r.Token)
+	assert.Equal(t, cloneDir, r.Dir)
+
+	// Verify the per-invocation header is injected by checking the encoded auth
+	// appears in the -c argument the runner would pass to git.
 	wantAuth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-	assert.Contains(t, string(header), "Authorization: Basic "+wantAuth)
+	assert.Contains(t, r.extraHeader(), "Authorization: Basic "+wantAuth)
 }

@@ -14,10 +14,37 @@ import (
 // Store provides persistent storage for repos, problems, and tasks backed by SQLite.
 type Store struct {
 	db *sql.DB
+	// test-only hooks; when non-nil the named method returns this error instead
+	// of executing. They are intended for tests that need to simulate persistence
+	// failures while keeping the database readable.
+	updateProblemErr func() error
+	updateTaskErr    error
+}
+
+// StoreOption configures a Store during construction.
+type StoreOption func(*Store)
+
+// WithUpdateProblemError returns a StoreOption that makes UpdateProblem return
+// err on every call. It is intended for tests.
+func WithUpdateProblemError(err error) StoreOption {
+	return func(s *Store) { s.updateProblemErr = func() error { return err } }
+}
+
+// WithUpdateProblemErrorFunc returns a StoreOption that makes UpdateProblem
+// return the result of fn on each call. It is intended for tests that need to
+// fail a specific invocation, e.g. the update after a GitHub issue is created.
+func WithUpdateProblemErrorFunc(fn func() error) StoreOption {
+	return func(s *Store) { s.updateProblemErr = fn }
+}
+
+// WithUpdateTaskError returns a StoreOption that makes UpdateTask return err.
+// It is intended for tests.
+func WithUpdateTaskError(err error) StoreOption {
+	return func(s *Store) { s.updateTaskErr = err }
 }
 
 // New opens the SQLite database at dbPath and runs migrations.
-func New(dbPath string) (*Store, error) {
+func New(dbPath string, opts ...StoreOption) (*Store, error) {
 	isMemory := dbPath == ":memory:" || strings.HasPrefix(dbPath, "file::memory:")
 	if !isMemory && !strings.Contains(dbPath, "_pragma=busy_timeout") {
 		if strings.Contains(dbPath, "?") {
@@ -40,7 +67,11 @@ func New(dbPath string) (*Store, error) {
 	if err := migrate(db); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 // Close closes the underlying database connection.
@@ -308,6 +339,11 @@ func (s *Store) ListProblemsByRepo(ctx context.Context, repoID string) ([]Proble
 
 // UpdateProblem persists changes to an existing problem.
 func (s *Store) UpdateProblem(ctx context.Context, p *Problem) error {
+	if s.updateProblemErr != nil {
+		if err := s.updateProblemErr(); err != nil {
+			return err
+		}
+	}
 	p.UpdatedAt = time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE problems SET description=?, status=?, repo_id=?, parent_issue_number=?, updated_at=? WHERE id = ?`,
@@ -383,6 +419,9 @@ func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 
 // UpdateTask persists changes to an existing task.
 func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
+	if s.updateTaskErr != nil {
+		return s.updateTaskErr
+	}
 	t.UpdatedAt = time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE tasks SET problem_id=?, repo_id=?, title=?, description=?, status=?, agent_session_id=?, branch=?, base_branch=?, pr_number=?, issue_number=?, output=?, attempts=?, max_attempts=?, updated_at=? WHERE id = ?`,

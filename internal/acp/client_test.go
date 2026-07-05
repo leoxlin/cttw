@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,4 +224,96 @@ func TestClient_MalformedAndUnmatchedResponsesIgnored(t *testing.T) {
 
 	_ = client.Close()
 	_ = agentIn.Close()
+}
+
+// closeInjectingTransport delivers a queued response from its Close method so
+// we can exercise a response arriving while the client is shutting down.
+type closeInjectingTransport struct {
+	mu      sync.Mutex
+	closed  bool
+	lines   chan []byte
+	onClose func()
+}
+
+func newCloseInjectingTransport(onClose func()) *closeInjectingTransport {
+	return &closeInjectingTransport{
+		lines:   make(chan []byte, 1),
+		onClose: onClose,
+	}
+}
+
+func (t *closeInjectingTransport) Start(ctx context.Context) error { return nil }
+
+func (t *closeInjectingTransport) Send(ctx context.Context, data []byte) error { return nil }
+
+func (t *closeInjectingTransport) Recv(ctx context.Context) ([]byte, error) {
+	select {
+	case line, ok := <-t.lines:
+		if !ok {
+			return nil, io.EOF
+		}
+		return line, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (t *closeInjectingTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil
+	}
+	t.closed = true
+	if t.onClose != nil {
+		t.onClose()
+	}
+	close(t.lines)
+	return nil
+}
+
+func TestClient_ResponseDuringCloseDoesNotPanic(t *testing.T) {
+	transport := newCloseInjectingTransport(nil)
+	client := NewClient(transport)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = client.Start(ctx)
+	}()
+
+	// Queue an Initialize call so there is a pending channel in the map.
+	callDone := make(chan struct{})
+	var callErr error
+	go func() {
+		defer close(callDone)
+		_, callErr = client.Initialize(ctx, InitializeRequest{
+			ProtocolVersion: 1,
+			ClientInfo:      Info{Name: "cttw", Version: "0.1"},
+		})
+	}()
+
+	// Give the goroutine time to register the pending call.
+	time.Sleep(20 * time.Millisecond)
+
+	// Close the transport; its Close implementation injects a response that
+	// would be routed after closeCh is already closed. Without the closeCh
+	// select this could send on a closed pending channel and panic.
+	res, _ := json.Marshal(Envelope{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Result:  json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"fake","version":"1"},"authMethods":[]}`),
+	})
+	transport.onClose = func() {
+		transport.lines <- res
+	}
+	require.NotPanics(t, func() { _ = client.Close() })
+
+	<-callDone
+	require.Error(t, callErr)
+	assert.Contains(t, callErr.Error(), "client closed")
+	<-done
 }

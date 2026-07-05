@@ -84,11 +84,13 @@ func (c *Coordinator) CreateProblem(ctx context.Context, owner, name, descriptio
 	}
 	defer agent.Close(ctx)
 
-	if err := agent.Initialize(ctx); err != nil {
+	setupCtx, cancel := context.WithTimeout(ctx, c.promptTimeout)
+	defer cancel()
+	if err := agent.Initialize(setupCtx); err != nil {
 		markFailed()
 		return nil, fmt.Errorf("%w: initialize agent: %w", ErrAgentFailed, err)
 	}
-	if err := agent.NewSession(ctx, acp.NewSessionRequest{CWD: r.LocalDir}); err != nil {
+	if err := agent.NewSession(setupCtx, acp.NewSessionRequest{CWD: r.LocalDir}); err != nil {
 		markFailed()
 		return nil, fmt.Errorf("%w: create session: %w", ErrAgentFailed, err)
 	}
@@ -141,6 +143,7 @@ Do not include markdown fences or explanation.`, owner, name, description)
 	}
 	problem.ParentIssueNumber = parentNumber
 	if err := c.store.UpdateProblem(ctx, problem); err != nil {
+		markFailed()
 		return nil, fmt.Errorf("update problem issue number: %w", err)
 	}
 

@@ -8,19 +8,28 @@ import (
 )
 
 type Runner struct {
-	Dir string
+	Dir   string
+	Token string
 }
 
-func run(dir string, args ...string) error {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run()
+// extraHeader returns the git -c argument that injects the Authorization header
+// for https://github.com/ when a token is configured. It is used per-invocation
+// so the token is never persisted in the cloned repository's local config.
+func (r *Runner) extraHeader() string {
+	auth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + r.Token))
+	header := fmt.Sprintf("Authorization: Basic %s", auth)
+	return fmt.Sprintf("http.https://github.com/.extraHeader=%s", header)
 }
 
 func (r *Runner) run(args ...string) error {
-	return run(r.Dir, args...)
+	if r.Token != "" {
+		args = append([]string{"-c", r.extraHeader()}, args...)
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = r.Dir
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
 }
 
 // Run executes an arbitrary git command in the runner's directory.
@@ -29,6 +38,9 @@ func (r *Runner) Run(args ...string) error {
 }
 
 func (r *Runner) runOutput(args ...string) ([]byte, error) {
+	if r.Token != "" {
+		args = append([]string{"-c", r.extraHeader()}, args...)
+	}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = r.Dir
 	return cmd.Output()
@@ -40,18 +52,20 @@ func (r *Runner) Output(args ...string) ([]byte, error) {
 }
 
 // Clone clones repo into dir using token for authentication. The token is not
-// embedded in the clone URL; instead it is sent via an Authorization header to
-// avoid leaking it in git output or process listings.
+// embedded in the clone URL or persisted in the repo config; instead it is sent
+// via an Authorization header on each git invocation to avoid leaking it in git
+// output, process listings, or on-disk configuration.
 func (r *Runner) Clone(repo, token, dir string) error {
-	auth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-	header := fmt.Sprintf("Authorization: Basic %s", auth)
-	extra := fmt.Sprintf("http.https://github.com/.extraHeader=%s", header)
-
-	if err := run("", "clone", "-c", extra, repo, dir); err != nil {
-		return err
+	r.Dir = dir
+	r.Token = token
+	args := []string{"clone", repo, dir}
+	if token != "" {
+		args = append([]string{"-c", r.extraHeader()}, args...)
 	}
-	// Persist the auth header so subsequent remote operations use it.
-	return run(dir, "config", "http.https://github.com/.extraHeader", header)
+	cmd := exec.Command("git", args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
 }
 
 func (r *Runner) Checkout(branch string) error {
@@ -69,6 +83,14 @@ func (r *Runner) Add(files ...string) error {
 
 func (r *Runner) Commit(message string) error {
 	return r.run("commit", "-m", message)
+}
+
+func (r *Runner) Fetch(ref string) error {
+	return r.run("fetch", "origin", ref)
+}
+
+func (r *Runner) Pull(branch string) error {
+	return r.run("pull", "origin", branch)
 }
 
 func (r *Runner) Push(branch string) error {

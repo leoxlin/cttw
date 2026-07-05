@@ -155,3 +155,38 @@ func TestCoordinator_CreateProblem_MarksFailedOnGitHubError(t *testing.T) {
 	assert.Len(t, tasks, 1)
 	assert.Equal(t, 0, problems[0].ParentIssueNumber)
 }
+
+func TestCoordinator_CreateProblem_MarksFailedOnUpdateAfterIssueCreation(t *testing.T) {
+	errUpdate := errors.New("update problem failed")
+	failOnce := true
+	s, err := store.New(":memory:", store.WithUpdateProblemErrorFunc(func() error {
+		if failOnce {
+			failOnce = false
+			return errUpdate
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	_, err = s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+	}
+
+	gh := &mockGitHub{issues: make(map[string]int)}
+	coord := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+	_, err = coord.CreateProblem(ctx, "llin", "cttw", "build the API")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errUpdate)
+
+	problems, err := s.ListProblems(ctx)
+	require.NoError(t, err)
+	require.Len(t, problems, 1)
+	assert.Equal(t, "failed", problems[0].Status)
+	assert.Greater(t, problems[0].ParentIssueNumber, 0)
+}
