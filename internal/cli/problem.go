@@ -34,7 +34,7 @@ func problemCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("problem %s created (%s)\n", pr.ID, pr.Status)
+			fmt.Printf("Problem %s created; decomposition in progress.\n", pr.ID)
 			return nil
 		},
 	}

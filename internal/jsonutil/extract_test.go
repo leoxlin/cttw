@@ -63,6 +63,18 @@ func TestExtractOutermost(t *testing.T) {
 			open:    '{',
 			wantErr: true,
 		},
+		{
+			name: "json inside string literal before real array",
+			input: `"[{"title":"fake"}]" [{"title":"real"}]`,
+			open:  '[',
+			want:  `[{"title":"real"}]`,
+		},
+		{
+			name: "json inside string literal before real object",
+			input: `"{"status":"fake"}" {"status":"real"}`,
+			open:  '{',
+			want:  `{"status":"real"}`,
+		},
 	}
 
 	for _, tt := range tests {

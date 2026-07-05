@@ -22,18 +22,39 @@ func ExtractOutermost(data []byte, open byte) ([]byte, error) {
 		return nil, fmt.Errorf("unsupported open delimiter %q", open)
 	}
 
-	start := 0
-	for {
-		idx := bytes.IndexByte(data[start:], open)
-		if idx < 0 {
-			return nil, fmt.Errorf("no JSON %c%c found", open, close)
+	inString := false
+	escape := false
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		if inString {
+			if escape {
+				escape = false
+				continue
+			}
+			if b == '\\' {
+				escape = true
+				continue
+			}
+			if b == '"' {
+				inString = false
+			}
+			continue
 		}
-		candidate := start + idx
+		if b == '"' {
+			inString = true
+			continue
+		}
+		if b != open {
+			continue
+		}
+
+		candidate := i
 		dec := json.NewDecoder(bytes.NewReader(data[candidate:]))
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err == nil {
 			return raw, nil
 		}
-		start = candidate + 1
 	}
+
+	return nil, fmt.Errorf("no JSON %c%c found", open, close)
 }

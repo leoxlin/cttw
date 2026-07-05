@@ -81,6 +81,15 @@ func TestCreatePullRequest(t *testing.T) {
 	assert.Equal(t, 99, n)
 }
 
+func TestNew_DefaultTimeout(t *testing.T) {
+	c := New("token", nil)
+	require.NotNil(t, c)
+	// The concrete type stores the configured http client.
+	cc, ok := c.(*client)
+	require.True(t, ok)
+	assert.Equal(t, defaultHTTPTimeout, cc.http.Timeout)
+}
+
 func TestRepoPathEscapesSpecialCharacters(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/repos/o%2Fr/r/issues", r.URL.EscapedPath())

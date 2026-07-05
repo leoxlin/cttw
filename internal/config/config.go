@@ -74,7 +74,9 @@ func Load(path string, env map[string]string) (*Config, error) {
 	if v := env["DAEMON_SOCKET"]; v != "" {
 		cfg.DaemonSocket = v
 	}
-	if v := env["CTTW_REPO"]; v != "" && len(cfg.Repos) == 0 {
+	// Environment variables override config file values. Precedence is
+	// flag > env > config file > default; flags are not handled here.
+	if v := env["CTTW_REPO"]; v != "" {
 		repos, err := parseRepoEnv(v)
 		if err != nil {
 			return nil, fmt.Errorf("CTTW_REPO: %w", err)

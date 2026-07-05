@@ -102,7 +102,7 @@ func TestServer_ShutdownWaitsForWorkerLoop(t *testing.T) {
 	srv.workerWg.Wait()
 }
 
-func TestServer_CreateProblem_MapsClientErrorsTo400(t *testing.T) {
+func TestServer_CreateProblem_AcceptsAsync(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
@@ -113,10 +113,16 @@ func TestServer_CreateProblem_MapsClientErrorsTo400(t *testing.T) {
 	_, err = s.CreateRepo(ctx, "llin", "cttw", repoDir, "main", "")
 	require.NoError(t, err)
 
+	decompositionStarted := make(chan struct{})
+	continueDecomposition := make(chan struct{})
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
 		return &launcher.MockAgent{
-			Responses: []string{`not valid json`},
+			Responses: []string{`[{"title":"t1","description":"d1"}]`},
+			OnPrompt: func(prompt string) {
+				close(decompositionStarted)
+				<-continueDecomposition
+			},
 		}, nil
 	}
 	gh := &mockGH{issues: make(map[string]int)}
@@ -140,7 +146,29 @@ func TestServer_CreateProblem_MapsClientErrorsTo400(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{"owner": "llin", "repo": "cttw", "description": "build API"})
 	resp, err := unixPost(sockFile, "/api/v1/problems", body)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
+
+	var problemResp problemResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problemResp))
+	assert.Equal(t, "build API", problemResp.Description)
+	assert.Equal(t, "pending", problemResp.Status)
+
+	// Wait until decomposition has started so we know the 202 preceded the work.
+	select {
+	case <-decompositionStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("decomposition did not start")
+	}
+
+	// Allow decomposition to finish and verify the problem becomes ready.
+	close(continueDecomposition)
+	require.Eventually(t, func() bool {
+		p, err := s.GetProblem(ctx, problemResp.ID)
+		if err != nil {
+			return false
+		}
+		return p.Status == "ready"
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestServer_CreateProblem_MapsRepoErrorTo400(t *testing.T) {
@@ -212,19 +240,24 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{"owner": "llin", "repo": "cttw", "description": "build API"})
 	resp, err := unixPost(sockFile, "/api/v1/problems", body)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
 
 	var problemResp problemResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problemResp))
 	assert.Equal(t, "build API", problemResp.Description)
-	assert.Equal(t, "ready", problemResp.Status)
-	assert.Greater(t, problemResp.IssueNumber, 0)
+	assert.Equal(t, "pending", problemResp.Status)
 
-	resp, err = unixGet(sockFile, "/api/v1/problems/"+problemResp.ID)
-	require.NoError(t, err)
-	var got problemResponse
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
-	assert.Len(t, got.Tasks, 1)
+	require.Eventually(t, func() bool {
+		resp, err = unixGet(sockFile, "/api/v1/problems/"+problemResp.ID)
+		if err != nil {
+			return false
+		}
+		var got problemResponse
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			return false
+		}
+		return got.Status == "ready" && len(got.Tasks) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func waitForSocket(t *testing.T, path string) {

@@ -12,6 +12,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestClient_CreateProblem_Accepts202(t *testing.T) {
+	want := ProblemResponse{
+		ID:          "p1",
+		Description: "build API",
+		Status:      "pending",
+		RepoID:      "r1",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/problems", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		require.NoError(t, json.NewEncoder(w).Encode(want))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Listener.Addr().String())
+	got, err := client.CreateProblem("llin", "cttw", "build API")
+	require.NoError(t, err)
+	assert.Equal(t, want, *got)
+}
+
 func TestClient_CreateProblem(t *testing.T) {
 	want := ProblemResponse{
 		ID:          "p1",

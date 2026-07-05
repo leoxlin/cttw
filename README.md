@@ -59,6 +59,8 @@ designed for unattended daemon execution, the local handler auto-approves all
 `permission/request` calls from the agent. Only run cttw in environments where
 this level of access is acceptable.
 
+> **Note:** This branch uses a new SQLite schema (`repos`, `problems`, `tasks`). Legacy tables from earlier versions (`chunks`, `jobs`, `config`, and any old `tasks`) are left in place when opening an existing database but are no longer used.
+
 ## Development
 
 With [mise](https://mise.jdx.dev):

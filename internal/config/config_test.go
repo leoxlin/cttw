@@ -129,7 +129,7 @@ func TestLoad_RepoFromEnv(t *testing.T) {
 	assert.Equal(t, "main", cfg.Repos[1].DefaultBranch)
 }
 
-func TestLoad_TOMLReposOverrideEnv(t *testing.T) {
+func TestLoad_EnvOverridesTOMLRepos(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cttw.toml")
 	content := `
@@ -145,8 +145,8 @@ name = "toml"
 	})
 	require.NoError(t, err)
 	require.Len(t, cfg.Repos, 1)
-	assert.Equal(t, "from", cfg.Repos[0].Owner)
-	assert.Equal(t, "toml", cfg.Repos[0].Name)
+	assert.Equal(t, "llin", cfg.Repos[0].Owner)
+	assert.Equal(t, "cttw", cfg.Repos[0].Name)
 }
 
 func TestLoad_InvalidRepoEnv(t *testing.T) {

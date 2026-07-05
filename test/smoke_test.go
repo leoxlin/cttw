@@ -63,7 +63,15 @@ func TestIntegration_FakeACPAgent(t *testing.T) {
 
 	problem, err := coord.CreateProblem(ctx, "o", "r", "add smoke test")
 	require.NoError(t, err)
-	assert.Equal(t, "ready", problem.Status)
+	assert.Equal(t, "pending", problem.Status)
+
+	require.Eventually(t, func() bool {
+		p, err := s.GetProblem(ctx, problem.ID)
+		if err != nil {
+			return false
+		}
+		return p.Status == "ready"
+	}, 2*time.Second, 10*time.Millisecond)
 
 	tasks, err := s.ListTasksByProblem(ctx, problem.ID)
 	require.NoError(t, err)

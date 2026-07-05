@@ -73,6 +73,7 @@ func (s *Server) run() error {
 	defer func() {
 		s.Shutdown()
 		s.workerWg.Wait()
+		s.Coordinator.Wait()
 		s.Store.Close()
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -182,16 +183,13 @@ func (s *Server) handleCreateProblem(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, coordinator.ErrRepoNotRegistered):
 			http.Error(w, err.Error(), http.StatusBadRequest)
-		case errors.Is(err, coordinator.ErrGitHubFailed),
-			errors.Is(err, coordinator.ErrAgentFailed):
-			http.Error(w, err.Error(), http.StatusBadGateway)
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(problemToResponse(problem, nil))
 }
 

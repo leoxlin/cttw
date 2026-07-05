@@ -90,10 +90,6 @@ var migrations = []migration{
 		version: 1,
 		name:    "repos_problems_tasks",
 		stmts: []string{
-			`DROP TABLE IF EXISTS chunks;`,
-			`DROP TABLE IF EXISTS jobs;`,
-			`DROP TABLE IF EXISTS tasks;`,
-			`DROP TABLE IF EXISTS config;`,
 			`CREATE TABLE IF NOT EXISTS repos (
 				id TEXT PRIMARY KEY,
 				owner TEXT NOT NULL,
@@ -350,6 +346,18 @@ func (s *Store) UpdateProblem(ctx context.Context, p *Problem) error {
 		p.Description, p.Status, p.RepoID, p.ParentIssueNumber, p.UpdatedAt, p.ID,
 	)
 	return err
+}
+
+// FailTasksByProblem marks every task belonging to a problem as failed.
+func (s *Store) FailTasksByProblem(ctx context.Context, problemID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET status = 'failed', updated_at = ? WHERE problem_id = ?`,
+		time.Now().UTC(), problemID,
+	)
+	if err != nil {
+		return fmt.Errorf("fail tasks by problem: %w", err)
+	}
+	return nil
 }
 
 func scanProblem(s scanner) (*Problem, error) {

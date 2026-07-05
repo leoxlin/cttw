@@ -89,6 +89,28 @@ func TestProblemAndTasks_CRUD(t *testing.T) {
 	assert.Equal(t, "running", got.Status)
 }
 
+func TestFailTasksByProblem(t *testing.T) {
+	s, err := New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	ctx := context.Background()
+
+	repo, _ := s.CreateRepo(ctx, "o", "r", "/tmp/r", "main", "")
+	problem, _ := s.CreateProblem(ctx, "x", repo.ID)
+	t1, _ := s.CreateTask(ctx, problem.ID, repo.ID, "t1", "d1")
+	t2, _ := s.CreateTask(ctx, problem.ID, repo.ID, "t2", "d2")
+
+	require.NoError(t, s.FailTasksByProblem(ctx, problem.ID))
+
+	got1, err := s.GetTask(ctx, t1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got1.Status)
+
+	got2, err := s.GetTask(ctx, t2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got2.Status)
+}
+
 func TestNextPendingTask(t *testing.T) {
 	s, err := New(":memory:")
 	require.NoError(t, err)

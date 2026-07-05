@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // Client provides GitHub API operations needed by cttw.
@@ -24,17 +25,19 @@ type client struct {
 	http    *http.Client
 }
 
+const defaultHTTPTimeout = 60 * time.Second
+
 // New creates a GitHub client using the production API endpoint.
 func New(token string, httpClient *http.Client) Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &client{token: token, baseURL: "https://api.github.com", http: httpClient}
 }
 
 func newWithURL(token, baseURL string, httpClient *http.Client) Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &client{token: token, baseURL: baseURL, http: httpClient}
 }
