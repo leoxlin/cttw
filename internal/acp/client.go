@@ -104,14 +104,18 @@ func (c *Client) isClosed() bool {
 }
 
 func (c *Client) routeResponse(env Envelope) {
-	c.mu.Lock()
 	var id int64
 	if err := json.Unmarshal(env.ID, &id); err != nil {
-		c.mu.Unlock()
 		select {
 		case c.errCh <- fmt.Errorf("acp: malformed response id: %w", err):
 		default:
 		}
+		return
+	}
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
 		return
 	}
 	ch, ok := c.pending[id]
@@ -123,13 +127,11 @@ func (c *Client) routeResponse(env Envelope) {
 		}
 		return
 	}
-	c.mu.Unlock()
-
 	select {
 	case ch <- env:
-	case <-c.closeCh:
 	default:
 	}
+	c.mu.Unlock()
 }
 
 func (c *Client) handleRequest(ctx context.Context, env Envelope) error {

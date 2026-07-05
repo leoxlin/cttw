@@ -33,3 +33,31 @@ func TestStdioTransport_SendRecv(t *testing.T) {
 	_ = client.Close()
 	_ = server.Close()
 }
+
+func TestStdioTransport_SendDoesNotMutateCallerBuffer(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := NewStdioTransport(inWriter, outReader)
+	go func() {
+		_ = client.Start(context.Background())
+	}()
+
+	server := NewStdioTransport(outWriter, inReader)
+	go func() {
+		_ = server.Start(context.Background())
+	}()
+
+	original := []byte(`{"jsonrpc":"2.0","id":1}`)
+	want := make([]byte, len(original))
+	copy(want, original)
+
+	require.NoError(t, client.Send(context.Background(), original))
+	got, err := server.Recv(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+	assert.Equal(t, want, original)
+
+	_ = client.Close()
+	_ = server.Close()
+}

@@ -72,7 +72,10 @@ func (t *StdioTransport) Send(ctx context.Context, data []byte) error {
 	if t.closed {
 		return fmt.Errorf("transport closed")
 	}
-	_, err := t.stdin.Write(append(data, '\n'))
+	line := make([]byte, len(data)+1)
+	copy(line, data)
+	line[len(data)] = '\n'
+	_, err := t.stdin.Write(line)
 	return err
 }
 

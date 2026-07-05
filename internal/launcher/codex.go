@@ -102,7 +102,11 @@ type codexAgent struct {
 func (a *codexAgent) Initialize(ctx context.Context) error {
 	_, err := a.client.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion: 1,
-		ClientInfo:      acp.Info{Name: "cttw", Version: "0.1"},
+		ClientCapabilities: acp.ClientCapabilities{
+			FS:       acp.FSCapabilities{ReadTextFile: true, WriteTextFile: true},
+			Terminal: true,
+		},
+		ClientInfo: acp.Info{Name: "cttw", Version: "0.1"},
 	})
 	return err
 }
@@ -162,10 +166,31 @@ type defaultHandler struct {
 	terminals map[string]*terminalSession
 }
 
+// safeBuffer wraps a strings.Builder with an external mutex. The mutex is
+// shared between stdout, stderr, and the terminal exit status so that all
+// terminal goroutines synchronize through the same lock.
+type safeBuffer struct {
+	mu *sync.Mutex
+	b  strings.Builder
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 type terminalSession struct {
 	cmd    *exec.Cmd
-	stdout *strings.Builder
-	stderr *strings.Builder
+	mu     sync.Mutex
+	stdout *safeBuffer
+	stderr *safeBuffer
 	done   chan struct{}
 	exit   *acp.TerminalExitStatus
 }
@@ -252,19 +277,17 @@ func (d *defaultHandler) HandleCreateTerminal(ctx context.Context, req acp.Creat
 		cmd.Env = env
 	}
 
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	session := &terminalSession{
+		cmd:  cmd,
+		done: make(chan struct{}),
+	}
+	session.stdout = &safeBuffer{mu: &session.mu}
+	session.stderr = &safeBuffer{mu: &session.mu}
+	cmd.Stdout = session.stdout
+	cmd.Stderr = session.stderr
 
 	if err := cmd.Start(); err != nil {
 		return nil, err
-	}
-
-	session := &terminalSession{
-		cmd:    cmd,
-		stdout: &stdout,
-		stderr: &stderr,
-		done:   make(chan struct{}),
 	}
 
 	go func() {
@@ -278,7 +301,9 @@ func (d *defaultHandler) HandleCreateTerminal(ctx context.Context, req acp.Creat
 				exit.ExitCode = -1
 			}
 		}
+		session.mu.Lock()
 		session.exit = exit
+		session.mu.Unlock()
 	}()
 
 	id := strconv.Itoa(int(time.Now().UnixNano()))
@@ -300,7 +325,11 @@ func (d *defaultHandler) HandleTerminalOutput(ctx context.Context, req acp.Termi
 		return nil, fmt.Errorf("terminal %q not found", req.TerminalID)
 	}
 
-	out := session.stdout.String() + session.stderr.String()
+	session.mu.Lock()
+	out := session.stdout.b.String() + session.stderr.b.String()
+	exit := session.exit
+	session.mu.Unlock()
+
 	truncated := false
 	const limit = 1024 * 1024 // 1 MiB default
 	if len(out) > limit {
@@ -309,8 +338,8 @@ func (d *defaultHandler) HandleTerminalOutput(ctx context.Context, req acp.Termi
 	}
 
 	resp := &acp.TerminalOutputResponse{Output: out, Truncated: truncated}
-	if session.exit != nil {
-		resp.ExitStatus = session.exit
+	if exit != nil {
+		resp.ExitStatus = exit
 	}
 	return resp, nil
 }
@@ -329,11 +358,13 @@ func (d *defaultHandler) HandleWaitForTerminalExit(ctx context.Context, req acp.
 		return nil, ctx.Err()
 	}
 
+	session.mu.Lock()
 	exit := &acp.WaitForTerminalExitResponse{ExitCode: 0}
 	if session.exit != nil {
 		exit.ExitCode = session.exit.ExitCode
 		exit.Signal = session.exit.Signal
 	}
+	session.mu.Unlock()
 	return exit, nil
 }
 

@@ -243,15 +243,19 @@ type problemResponse struct {
 	Status      string         `json:"status"`
 	RepoID      string         `json:"repo_id"`
 	IssueNumber int            `json:"issue_number"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
 	Tasks       []taskResponse `json:"tasks,omitempty"`
 }
 
 type taskResponse struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	PRNumber    int    `json:"pr_number,omitempty"`
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	Status      string    `json:"status"`
+	PRNumber    int       `json:"pr_number,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
@@ -261,6 +265,8 @@ func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
 		Status:      p.Status,
 		RepoID:      p.RepoID,
 		IssueNumber: p.ParentIssueNumber,
+		CreatedAt:   p.CreatedAt,
+		UpdatedAt:   p.UpdatedAt,
 	}
 	for _, t := range tasks {
 		resp.Tasks = append(resp.Tasks, taskResponse{
@@ -269,6 +275,8 @@ func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
 			Description: t.Description,
 			Status:      t.Status,
 			PRNumber:    t.PRNumber,
+			CreatedAt:   t.CreatedAt,
+			UpdatedAt:   t.UpdatedAt,
 		})
 	}
 	return resp

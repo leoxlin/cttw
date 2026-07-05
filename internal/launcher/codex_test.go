@@ -2,9 +2,11 @@ package launcher
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -219,4 +221,108 @@ func main() {
 	require.NoError(t, err)
 	err = proc.Signal(syscall.Signal(0))
 	assert.Error(t, err, "process should no longer exist after Close")
+}
+
+// recordingTransport captures every line sent and returns a single canned
+// response for the client read loop.
+type recordingTransport struct {
+	mu     sync.Mutex
+	sent   [][]byte
+	resp   []byte
+	recvCh chan []byte
+}
+
+func newRecordingTransport(resp []byte) *recordingTransport {
+	return &recordingTransport{
+		resp:   resp,
+		recvCh: make(chan []byte, 1),
+	}
+}
+
+func (r *recordingTransport) Start(ctx context.Context) error { return nil }
+func (r *recordingTransport) Send(ctx context.Context, data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent = append(r.sent, append([]byte(nil), data...))
+	if r.resp != nil {
+		select {
+		case r.recvCh <- r.resp:
+		default:
+		}
+	}
+	return nil
+}
+func (r *recordingTransport) Recv(ctx context.Context) ([]byte, error) {
+	select {
+	case line := <-r.recvCh:
+		return line, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func (r *recordingTransport) Close() error { return nil }
+
+func TestCodexAgent_Initialize_AdvertisesCapabilities(t *testing.T) {
+	resp, err := json.Marshal(acp.Envelope{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Result:  json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"fake","version":"1"},"authMethods":[]}`),
+	})
+	require.NoError(t, err)
+
+	transport := newRecordingTransport(resp)
+	client := acp.NewClient(transport)
+	agent := &codexAgent{client: client}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = client.Start(ctx) }()
+
+	require.NoError(t, agent.Initialize(ctx))
+
+	require.Len(t, transport.sent, 1)
+	var env acp.Envelope
+	require.NoError(t, json.Unmarshal(transport.sent[0], &env))
+	var req acp.InitializeRequest
+	require.NoError(t, json.Unmarshal(env.Params, &req))
+
+	assert.True(t, req.ClientCapabilities.FS.ReadTextFile, "expected ReadTextFile capability")
+	assert.True(t, req.ClientCapabilities.FS.WriteTextFile, "expected WriteTextFile capability")
+	assert.True(t, req.ClientCapabilities.Terminal, "expected Terminal capability")
+}
+
+func TestDefaultHandler_TerminalOutputNoRace(t *testing.T) {
+	cwd := t.TempDir()
+	d := &defaultHandler{cwd: cwd}
+	ctx := context.Background()
+
+	res, err := d.HandleCreateTerminal(ctx, acp.CreateTerminalRequest{
+		Command: "sh",
+		Args:    []string{"-c", "for i in $(seq 1 200); do echo line$i; done"},
+	})
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = d.HandleTerminalOutput(ctx, acp.TerminalOutputRequest{TerminalID: res.TerminalID})
+			}
+		}
+	}()
+
+	_, err = d.HandleWaitForTerminalExit(ctx, acp.WaitForTerminalExitRequest{TerminalID: res.TerminalID})
+	require.NoError(t, err)
+	close(stop)
+	wg.Wait()
+
+	out, err := d.HandleTerminalOutput(ctx, acp.TerminalOutputRequest{TerminalID: res.TerminalID})
+	require.NoError(t, err)
+	require.Contains(t, out.Output, "line200")
 }

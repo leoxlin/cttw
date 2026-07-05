@@ -152,6 +152,8 @@ func TestServer_CreateProblem_AcceptsAsync(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problemResp))
 	assert.Equal(t, "build API", problemResp.Description)
 	assert.Equal(t, "pending", problemResp.Status)
+	assert.NotZero(t, problemResp.CreatedAt)
+	assert.NotZero(t, problemResp.UpdatedAt)
 
 	// Wait until decomposition has started so we know the 202 preceded the work.
 	select {
@@ -247,17 +249,23 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	assert.Equal(t, "build API", problemResp.Description)
 	assert.Equal(t, "pending", problemResp.Status)
 
+	var got problemResponse
 	require.Eventually(t, func() bool {
 		resp, err = unixGet(sockFile, "/api/v1/problems/"+problemResp.ID)
 		if err != nil {
 			return false
 		}
-		var got problemResponse
 		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 			return false
 		}
 		return got.Status == "ready" && len(got.Tasks) == 1
 	}, 2*time.Second, 10*time.Millisecond)
+
+	assert.NotZero(t, got.CreatedAt)
+	assert.NotZero(t, got.UpdatedAt)
+	require.Len(t, got.Tasks, 1)
+	assert.NotZero(t, got.Tasks[0].CreatedAt)
+	assert.NotZero(t, got.Tasks[0].UpdatedAt)
 }
 
 func waitForSocket(t *testing.T, path string) {

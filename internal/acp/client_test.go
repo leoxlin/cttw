@@ -317,3 +317,40 @@ func TestClient_ResponseDuringCloseDoesNotPanic(t *testing.T) {
 	assert.Contains(t, callErr.Error(), "client closed")
 	<-done
 }
+
+// eofTransport returns EOF immediately so the client read loop exits cleanly.
+type eofTransport struct{}
+
+func (eofTransport) Start(ctx context.Context) error { return nil }
+func (eofTransport) Send(ctx context.Context, data []byte) error { return nil }
+func (eofTransport) Recv(ctx context.Context) ([]byte, error) { return nil, io.EOF }
+func (eofTransport) Close() error { return nil }
+
+func TestClient_ConcurrentRouteResponseAndClose(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		client := NewClient(eofTransport{})
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _ = client.Start(ctx) }()
+
+		ch := make(chan Envelope, 1)
+		client.mu.Lock()
+		client.pending[1] = ch
+		client.mu.Unlock()
+
+		env := Envelope{ID: json.RawMessage(`1`), Result: json.RawMessage(`{}`)}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			client.routeResponse(env)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = client.Close()
+		}()
+		wg.Wait()
+
+		cancel()
+		_ = client.Close()
+	}
+}
