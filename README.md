@@ -6,12 +6,16 @@ A TUI CLI + daemon that coordinates ACP agents to break user problems into tasks
 
 ```bash
 export GITHUB_TOKEN=...
+export CTTW_REPO=owner/repo
 # Install an ACP-compatible agent adapter, e.g.:
 #   https://github.com/zed-industries/codex-acp
 cttw daemon start
 cttw problem owner/repo "add OAuth2 login"
 cttw
 ```
+
+`CTTW_REPO` accepts a comma-separated list of repositories in `owner/name[:branch]`
+form; the branch defaults to `main` when omitted.
 
 ## Configuration
 

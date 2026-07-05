@@ -31,6 +31,10 @@ type Server struct {
 	Socket       string
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
+	workerWg     sync.WaitGroup
+
+	// workerTickInterval is used by tests to speed up the worker loop.
+	workerTickInterval time.Duration
 }
 
 func Run() error {
@@ -66,18 +70,28 @@ func Run() error {
 }
 
 func (s *Server) run() error {
-	defer s.Store.Close()
+	defer func() {
+		s.Shutdown()
+		s.workerWg.Wait()
+		s.Store.Close()
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := s.Store.ResetRunningTasks(ctx); err != nil {
 		return fmt.Errorf("reset running tasks: %w", err)
 	}
+	s.workerWg.Add(1)
 	go s.workerLoop(ctx)
 	return s.Serve()
 }
 
 func (s *Server) workerLoop(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
+	defer s.workerWg.Done()
+	interval := s.workerTickInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -165,11 +179,14 @@ func (s *Server) handleCreateProblem(w http.ResponseWriter, r *http.Request) {
 	}
 	problem, err := s.Coordinator.CreateProblem(r.Context(), req.Owner, req.Repo, req.Description)
 	if err != nil {
-		if errors.Is(err, coordinator.ErrRepoNotRegistered) {
+		switch {
+		case errors.Is(err, coordinator.ErrRepoNotRegistered),
+			errors.Is(err, coordinator.ErrGitHubFailed),
+			errors.Is(err, coordinator.ErrAgentFailed):
 			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

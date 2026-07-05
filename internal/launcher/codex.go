@@ -1,3 +1,12 @@
+// Package launcher starts ACP agents and provides the local client handler
+// that agents use to interact with the repository.
+//
+// The defaultHandler implementation in this file is part of the MVP local-agent
+// launcher. The agent is trusted to run terminal commands and read/write files
+// within the configured repository directory. Path traversal outside that
+// directory is rejected, but the agent otherwise has broad local access.
+// permission/request always returns "allowed" in the MVP because an interactive
+// prompt would block unattended daemon execution.
 package launcher
 
 import (
@@ -5,12 +14,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/llin/cttw/internal/acp"
@@ -52,11 +63,13 @@ func (l *CodexLauncher) Launch(ctx context.Context, spec LaunchSpec) (Agent, err
 	}
 
 	// Reap the child process to avoid zombies and log unexpected exits.
+	processDone := make(chan struct{})
 	go func() {
+		defer close(processDone)
 		if err := cmd.Wait(); err != nil {
 			// Only log if the process exited with an error. Context cancellation
 			// may also surface here; log at a low level for observability.
-			fmt.Fprintf(os.Stderr, "codex agent exited: %v\n", err)
+			log.Printf("codex agent exited: %v", err)
 		}
 	}()
 
@@ -69,17 +82,19 @@ func (l *CodexLauncher) Launch(ctx context.Context, spec LaunchSpec) (Agent, err
 	}()
 
 	return &codexAgent{
-		client: client,
-		cmd:    cmd,
-		spec:   spec,
+		client:      client,
+		cmd:         cmd,
+		spec:        spec,
+		processDone: processDone,
 	}, nil
 }
 
 type codexAgent struct {
-	client    *acp.Client
-	cmd       *exec.Cmd
-	spec      LaunchSpec
-	sessionID string
+	client      *acp.Client
+	cmd         *exec.Cmd
+	spec        LaunchSpec
+	sessionID   string
+	processDone chan struct{}
 }
 
 func (a *codexAgent) Initialize(ctx context.Context) error {
@@ -119,7 +134,23 @@ func (a *codexAgent) Close(ctx context.Context) error {
 	if a.sessionID != "" {
 		_ = a.client.CloseSession(ctx, acp.CloseSessionRequest{SessionID: a.sessionID})
 	}
-	return a.client.Close()
+	if err := a.client.Close(); err != nil {
+		return err
+	}
+
+	// Terminate the underlying agent process. SIGTERM first, then SIGKILL after
+	// a timeout. The reap goroutine owns cmd.Wait() and closes processDone when
+	// it returns, so we never double-wait.
+	if a.cmd.Process != nil {
+		_ = a.cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-a.processDone:
+		case <-time.After(5 * time.Second):
+			_ = a.cmd.Process.Kill()
+			<-a.processDone
+		}
+	}
+	return nil
 }
 
 // defaultHandler provides real implementations for fs/terminal client methods.
@@ -137,18 +168,29 @@ type terminalSession struct {
 	exit   *acp.TerminalExitStatus
 }
 
-func (d *defaultHandler) resolvePath(path string) string {
-	if filepath.IsAbs(path) {
-		return path
+func (d *defaultHandler) resolvePath(path string) (string, error) {
+	if d.cwd == "" {
+		return "", fmt.Errorf("no working directory configured")
 	}
-	if d.cwd != "" {
-		return filepath.Join(d.cwd, path)
+	clean := filepath.Clean(path)
+	if filepath.IsAbs(clean) {
+		if !strings.HasPrefix(clean, d.cwd+string(filepath.Separator)) && clean != d.cwd {
+			return "", fmt.Errorf("path %q is outside repo directory", path)
+		}
+		return clean, nil
 	}
-	return path
+	resolved := filepath.Join(d.cwd, clean)
+	if !strings.HasPrefix(resolved, d.cwd+string(filepath.Separator)) && resolved != d.cwd {
+		return "", fmt.Errorf("path %q resolves outside repo directory", path)
+	}
+	return resolved, nil
 }
 
 func (d *defaultHandler) HandleReadTextFile(ctx context.Context, req acp.ReadTextFileRequest) (*acp.ReadTextFileResponse, error) {
-	path := d.resolvePath(req.Path)
+	path, err := d.resolvePath(req.Path)
+	if err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -179,7 +221,10 @@ func (d *defaultHandler) HandleReadTextFile(ctx context.Context, req acp.ReadTex
 }
 
 func (d *defaultHandler) HandleWriteTextFile(ctx context.Context, req acp.WriteTextFileRequest) error {
-	path := d.resolvePath(req.Path)
+	path, err := d.resolvePath(req.Path)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
@@ -191,8 +236,12 @@ func (d *defaultHandler) HandleCreateTerminal(ctx context.Context, req acp.Creat
 	if cwd == "" {
 		cwd = d.cwd
 	}
+	resolved, err := d.resolvePath(cwd)
+	if err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
-	cmd.Dir = cwd
+	cmd.Dir = resolved
 	if len(req.Env) > 0 {
 		env := os.Environ()
 		for _, e := range req.Env {

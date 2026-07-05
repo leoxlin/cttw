@@ -112,3 +112,47 @@ type = "local"
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "command")
 }
+
+func TestLoad_RepoFromEnv(t *testing.T) {
+	cfg, err := Load("", map[string]string{
+		"GITHUB_TOKEN": "tok",
+		"CTTW_REPO":    "llin/cttw:main,acme/other",
+	})
+	require.NoError(t, err)
+	require.Len(t, cfg.Repos, 2)
+	assert.Equal(t, "llin", cfg.Repos[0].Owner)
+	assert.Equal(t, "cttw", cfg.Repos[0].Name)
+	assert.Equal(t, "main", cfg.Repos[0].DefaultBranch)
+	assert.Equal(t, "acme", cfg.Repos[1].Owner)
+	assert.Equal(t, "other", cfg.Repos[1].Name)
+	assert.Equal(t, "main", cfg.Repos[1].DefaultBranch)
+}
+
+func TestLoad_TOMLReposOverrideEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cttw.toml")
+	content := `
+[[repos]]
+owner = "from"
+name = "toml"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	cfg, err := Load(path, map[string]string{
+		"GITHUB_TOKEN": "tok",
+		"CTTW_REPO":    "llin/cttw",
+	})
+	require.NoError(t, err)
+	require.Len(t, cfg.Repos, 1)
+	assert.Equal(t, "from", cfg.Repos[0].Owner)
+	assert.Equal(t, "toml", cfg.Repos[0].Name)
+}
+
+func TestLoad_InvalidRepoEnv(t *testing.T) {
+	_, err := Load("", map[string]string{
+		"GITHUB_TOKEN": "tok",
+		"CTTW_REPO":    "not-a-repo",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CTTW_REPO")
+}

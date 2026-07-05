@@ -10,13 +10,22 @@ import (
 
 	"github.com/llin/cttw/internal/acp"
 	"github.com/llin/cttw/internal/github"
+	"github.com/llin/cttw/internal/jsonutil"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
 )
 
-// ErrRepoNotRegistered is returned when a requested repo has not been registered.
-var ErrRepoNotRegistered = errors.New("repo not registered")
+// Sentinel errors for classes of problems that are client or configuration
+// errors rather than internal server bugs.
+var (
+	// ErrRepoNotRegistered is returned when a requested repo has not been registered.
+	ErrRepoNotRegistered = errors.New("repo not registered")
+	// ErrGitHubFailed is returned when a GitHub API call fails.
+	ErrGitHubFailed = errors.New("github request failed")
+	// ErrAgentFailed is returned when launching, prompting, or parsing an ACP agent response fails.
+	ErrAgentFailed = errors.New("agent request failed")
+)
 
 type Coordinator struct {
 	store    *store.Store
@@ -52,7 +61,7 @@ func (c *Coordinator) CreateProblem(ctx context.Context, owner, name, descriptio
 	// Create GitHub issue for the problem.
 	parentNumber, err := c.gh.CreateIssue(ctx, owner, name, description, "Coordinated by cttw.")
 	if err != nil {
-		return nil, fmt.Errorf("create parent issue: %w", err)
+		return nil, fmt.Errorf("%w: create parent issue: %w", ErrGitHubFailed, err)
 	}
 	problem.ParentIssueNumber = parentNumber
 	if err := c.store.UpdateProblem(ctx, problem); err != nil {
@@ -66,15 +75,15 @@ func (c *Coordinator) CreateProblem(ctx context.Context, owner, name, descriptio
 		Task:    launcher.TaskContext{ProblemDescription: description},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("launch coordinator agent: %w", err)
+		return nil, fmt.Errorf("%w: launch coordinator agent: %w", ErrAgentFailed, err)
 	}
 	defer agent.Close(ctx)
 
 	if err := agent.Initialize(ctx); err != nil {
-		return nil, fmt.Errorf("initialize agent: %w", err)
+		return nil, fmt.Errorf("%w: initialize agent: %w", ErrAgentFailed, err)
 	}
 	if err := agent.NewSession(ctx, acp.NewSessionRequest{CWD: r.LocalDir}); err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
+		return nil, fmt.Errorf("%w: create session: %w", ErrAgentFailed, err)
 	}
 
 	// Prompt for decomposition.
@@ -90,12 +99,12 @@ Do not include markdown fences or explanation.`, owner, name, description)
 
 	res, err := agent.Prompt(ctx, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("prompt agent: %w", err)
+		return nil, fmt.Errorf("%w: prompt agent: %w", ErrAgentFailed, err)
 	}
 
 	tasks, err := parseTasks(res.Content)
 	if err != nil {
-		return nil, fmt.Errorf("parse tasks: %w", err)
+		return nil, fmt.Errorf("%w: parse tasks: %w", ErrAgentFailed, err)
 	}
 
 	// Create tasks and child issues.
@@ -106,14 +115,14 @@ Do not include markdown fences or explanation.`, owner, name, description)
 		}
 		childNumber, err := c.gh.CreateIssue(ctx, owner, name, task.Title, task.Description)
 		if err != nil {
-			return nil, fmt.Errorf("create task issue: %w", err)
+			return nil, fmt.Errorf("%w: create task issue: %w", ErrGitHubFailed, err)
 		}
 		t.IssueNumber = childNumber
 		if err := c.store.UpdateTask(ctx, t); err != nil {
 			return nil, fmt.Errorf("update task issue number: %w", err)
 		}
 		if err := c.gh.CreateSubIssue(ctx, owner, name, parentNumber, childNumber); err != nil {
-			return nil, fmt.Errorf("link sub-issue: %w", err)
+			return nil, fmt.Errorf("%w: link sub-issue: %w", ErrGitHubFailed, err)
 		}
 	}
 
@@ -131,12 +140,12 @@ type taskSpec struct {
 
 func parseTasks(content string) ([]taskSpec, error) {
 	content = strings.TrimSpace(content)
-	start := findOutermost(content, '[', ']')
-	if start.Start < 0 {
-		return nil, fmt.Errorf("no JSON array found in response")
+	raw, err := jsonutil.ExtractOutermost([]byte(content), '[')
+	if err != nil {
+		return nil, fmt.Errorf("no JSON array found in response: %w", err)
 	}
 	var tasks []taskSpec
-	if err := json.Unmarshal([]byte(content[start.Start:start.End+1]), &tasks); err != nil {
+	if err := json.Unmarshal(raw, &tasks); err != nil {
 		return nil, err
 	}
 	for i, t := range tasks {
@@ -148,32 +157,4 @@ func parseTasks(content string) ([]taskSpec, error) {
 		}
 	}
 	return tasks, nil
-}
-
-type span struct {
-	Start int
-	End   int
-}
-
-// findOutermost returns the indices of the outermost balanced open/close pair,
-// or -1 if none exists.
-func findOutermost(s string, open, close byte) span {
-	depth := 0
-	start := -1
-	for i := 0; i < len(s); i++ {
-		if s[i] == open {
-			if depth == 0 {
-				start = i
-			}
-			depth++
-		} else if s[i] == close {
-			if depth > 0 {
-				depth--
-				if depth == 0 {
-					return span{Start: start, End: i}
-				}
-			}
-		}
-	}
-	return span{Start: -1, End: -1}
 }

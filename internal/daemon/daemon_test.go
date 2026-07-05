@@ -38,6 +38,111 @@ func (m *mockGH) CreatePullRequest(ctx context.Context, owner, repo, title, body
 	return 0, nil
 }
 
+func TestServer_ShutdownWaitsForWorkerLoop(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	// run() closes the store, so do not defer s.Close() here.
+
+	ctx := context.Background()
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	r, err := s.CreateRepo(ctx, "llin", "cttw", repoDir, "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	_, err = s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	gh := &mockGH{issues: make(map[string]int)}
+	regRoot := filepath.Join(t.TempDir(), "repos")
+
+	promptStarted := make(chan struct{})
+	continuePrompt := make(chan struct{})
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{""},
+			OnPrompt: func(prompt string) {
+				close(promptStarted)
+				<-continuePrompt
+			},
+		}, nil
+	}
+
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
+
+	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
+	srv := &Server{
+		Store:              s,
+		Coordinator:        coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex"),
+		Worker:             w,
+		Socket:             "unix://" + sockFile,
+		shutdown:           make(chan struct{}),
+		workerTickInterval: 50 * time.Millisecond,
+	}
+
+	go func() { _ = srv.run() }()
+	t.Cleanup(srv.Shutdown)
+	waitForSocket(t, sockFile)
+
+	// Wait for the worker loop to start a RunOnce call.
+	select {
+	case <-promptStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not start task")
+	}
+
+	// Shut down while RunOnce is blocked inside the agent prompt.
+	srv.Shutdown()
+
+	// Allow the agent prompt to return.
+	close(continuePrompt)
+
+	// The worker loop should have exited before the test cleanup runs.
+	srv.workerWg.Wait()
+}
+
+func TestServer_CreateProblem_MapsClientErrorsTo400(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	_, err = s.CreateRepo(ctx, "llin", "cttw", repoDir, "main", "")
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{`not valid json`},
+		}, nil
+	}
+	gh := &mockGH{issues: make(map[string]int)}
+	regRoot := filepath.Join(t.TempDir(), "repos")
+	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
+
+	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
+	srv := &Server{
+		Store:       s,
+		Coordinator: coord,
+		Worker:      w,
+		Socket:      "unix://" + sockFile,
+		shutdown:    make(chan struct{}),
+	}
+
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(srv.Shutdown)
+	waitForSocket(t, sockFile)
+
+	body, _ := json.Marshal(map[string]string{"owner": "llin", "repo": "cttw", "description": "build API"})
+	resp, err := unixPost(sockFile, "/api/v1/problems", body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
 func TestServer_CreateAndGetProblem(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/llin/cttw/internal/acp"
 	"github.com/llin/cttw/internal/github"
+	"github.com/llin/cttw/internal/jsonutil"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
@@ -137,42 +138,14 @@ type taskResult struct {
 	Error    string `json:"error"`
 }
 
-type span struct {
-	Start int
-	End   int
-}
-
-// findOutermost returns the indices of the outermost balanced open/close pair,
-// or {-1, -1} if none exists.
-func findOutermost(s string, open, close byte) span {
-	depth := 0
-	start := -1
-	for i := 0; i < len(s); i++ {
-		if s[i] == open {
-			if depth == 0 {
-				start = i
-			}
-			depth++
-		} else if s[i] == close {
-			if depth > 0 {
-				depth--
-				if depth == 0 {
-					return span{Start: start, End: i}
-				}
-			}
-		}
-	}
-	return span{Start: -1, End: -1}
-}
-
 func parseTaskResult(content string) (taskResult, error) {
 	content = strings.TrimSpace(content)
-	span := findOutermost(content, '{', '}')
-	if span.Start < 0 {
-		return taskResult{}, fmt.Errorf("no JSON object found in response")
+	raw, err := jsonutil.ExtractOutermost([]byte(content), '{')
+	if err != nil {
+		return taskResult{}, fmt.Errorf("no JSON object found in response: %w", err)
 	}
 	var out taskResult
-	if err := json.Unmarshal([]byte(content[span.Start:span.End+1]), &out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return taskResult{}, err
 	}
 	switch out.Status {

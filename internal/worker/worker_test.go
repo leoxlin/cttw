@@ -23,6 +23,36 @@ func (m *mockGH) CreatePullRequest(ctx context.Context, owner, repo, title, body
 	return 42, nil
 }
 
+func TestWorker_ExecuteTask_BracketsInStrings(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{`{"status":"completed","pr_number":42,"branch":"feat/add-handler","error":"]}{["}`},
+		}, nil
+	}
+
+	gh := &mockGH{}
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex")
+	require.NoError(t, w.ExecuteTask(ctx, task))
+
+	got, err := s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", got.Status)
+	assert.Equal(t, 42, got.PRNumber)
+}
+
 func TestWorker_ExecuteTask(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)

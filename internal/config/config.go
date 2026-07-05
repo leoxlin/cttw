@@ -30,7 +30,6 @@ type AgentConfig struct {
 type BackendConfig struct {
 	Type    string `toml:"type"`
 	Command string `toml:"command"`
-	URL     string `toml:"url"`
 }
 
 func Load(path string, env map[string]string) (*Config, error) {
@@ -57,6 +56,13 @@ func Load(path string, env map[string]string) (*Config, error) {
 	}
 	if v := env["DAEMON_SOCKET"]; v != "" {
 		cfg.DaemonSocket = v
+	}
+	if v := env["CTTW_REPO"]; v != "" && len(cfg.Repos) == 0 {
+		repos, err := parseRepoEnv(v)
+		if err != nil {
+			return nil, fmt.Errorf("CTTW_REPO: %w", err)
+		}
+		cfg.Repos = repos
 	}
 	if err := validate(cfg); err != nil {
 		return nil, err
@@ -95,6 +101,39 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("backend %q has unsupported type %q", cfg.Agent.DefaultBackend, backend.Type)
 	}
 	return nil
+}
+
+func parseRepoEnv(v string) ([]RepoConfig, error) {
+	var repos []RepoConfig
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		owner, name, branch, err := splitRepoSpec(part)
+		if err != nil {
+			return nil, err
+		}
+		repos = append(repos, RepoConfig{Owner: owner, Name: name, DefaultBranch: branch})
+	}
+	return repos, nil
+}
+
+func splitRepoSpec(spec string) (owner, name, branch string, err error) {
+	branch = "main"
+	if idx := strings.LastIndex(spec, ":"); idx >= 0 {
+		branch = spec[idx+1:]
+		spec = spec[:idx]
+	}
+	parts := strings.Split(spec, "/")
+	if len(parts) != 2 {
+		return "", "", "", fmt.Errorf("repo %q must be owner/name", spec)
+	}
+	owner, name = parts[0], parts[1]
+	if owner == "" || name == "" {
+		return "", "", "", fmt.Errorf("repo %q must have owner and name", spec)
+	}
+	return owner, name, branch, nil
 }
 
 func defaultConfigPath() string {

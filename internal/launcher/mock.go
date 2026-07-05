@@ -18,6 +18,7 @@ type MockAgent struct {
 	PromptsReceived []string
 	Responses       []string
 	responseIndex   int
+	OnPrompt        func(prompt string)
 }
 
 func (m *MockAgent) Initialize(ctx context.Context) error {
@@ -45,14 +46,23 @@ func (m *MockAgent) SessionID() string {
 
 func (m *MockAgent) Prompt(ctx context.Context, prompt string) (*acp.PromptResponse, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	onPrompt := m.OnPrompt
 	m.PromptsReceived = append(m.PromptsReceived, prompt)
 	if m.responseIndex >= len(m.Responses) {
+		m.mu.Unlock()
+		if onPrompt != nil {
+			onPrompt(prompt)
+		}
 		return nil, fmt.Errorf("no scripted response")
 	}
 	m.responseIndex++
+	res := m.Responses[m.responseIndex-1]
+	m.mu.Unlock()
+	if onPrompt != nil {
+		onPrompt(prompt)
+	}
 	return &acp.PromptResponse{
-		Content:    m.Responses[m.responseIndex-1],
+		Content:    res,
 		StopReason: acp.StopReasonEndTurn,
 	}, nil
 }
