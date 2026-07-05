@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
@@ -38,6 +39,9 @@ func (m *mockGitHub) CreateBranch(ctx context.Context, owner, repo, branch, base
 
 func (m *mockGitHub) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	return 0, nil
+}
+func (m *mockGitHub) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
+	return nil, nil
 }
 
 func waitForProblemStatus(t *testing.T, ctx context.Context, s *store.Store, id, want string) *store.Problem {
@@ -255,4 +259,33 @@ func TestCoordinator_CreateProblem_MarksFailedOnUpdateAfterIssueCreation(t *test
 
 	problem = waitForProblemStatus(t, ctx, s, problem.ID, "failed")
 	assert.Greater(t, problem.ParentIssueNumber, 0)
+}
+
+func TestCoordinator_CreateProblem_MarksFailedOnTaskUpdateAfterChildIssueCreation(t *testing.T) {
+	errUpdate := errors.New("update task failed")
+	s, err := store.New(":memory:", store.WithUpdateTaskError(errUpdate))
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	_, err = s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+	}
+
+	gh := &mockGitHub{issues: make(map[string]int)}
+	coord := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+	problem, err := coord.CreateProblem(ctx, "llin", "cttw", "build the API")
+	require.NoError(t, err)
+
+	problem = waitForProblemStatus(t, ctx, s, problem.ID, "failed")
+	assert.Greater(t, problem.ParentIssueNumber, 0)
+
+	tasks, err := s.ListTasksByProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "failed", tasks[0].Status)
 }

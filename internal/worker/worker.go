@@ -139,6 +139,17 @@ Return ONLY the JSON object, no markdown fences.`, r.Owner, r.Name, r.DefaultBra
 		task.Output = "completed response missing pr_number or branch"
 		return fmt.Errorf("completed task missing pr_number or branch")
 	}
+	pr, err := w.gh.GetPullRequest(ctx, r.Owner, r.Name, out.PRNumber)
+	if err != nil {
+		task.Status = "failed"
+		task.Output = fmt.Sprintf("verify pull request: %v", err)
+		return fmt.Errorf("verify pull request: %w", err)
+	}
+	if pr == nil || pr.Head.Ref != out.Branch {
+		task.Status = "failed"
+		task.Output = fmt.Sprintf("reported branch %q does not match pull request #%d", out.Branch, out.PRNumber)
+		return fmt.Errorf("reported branch %q does not match pull request #%d", out.Branch, out.PRNumber)
+	}
 	task.Status = "completed"
 	if err := w.store.UpdateTask(ctx, task); err != nil {
 		return fmt.Errorf("update task: %w", err)

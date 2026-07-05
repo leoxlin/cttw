@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,4 +33,21 @@ func TestProblemResponse_JSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(b), `"id":"p1"`)
 	assert.Contains(t, string(b), `"tasks":[`)
+}
+
+func TestTaskResponse_JSON(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	resp := TaskResponse{
+		ID:          "t1",
+		Title:       "add handler",
+		Description: "impl POST",
+		Status:      "pending",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	b, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"id":"t1"`)
+	assert.Contains(t, string(b), `"created_at":"2026-07-05T12:00:00Z"`)
+	assert.Contains(t, string(b), `"updated_at":"2026-07-05T12:00:00Z"`)
 }

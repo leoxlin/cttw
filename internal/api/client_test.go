@@ -34,14 +34,18 @@ func TestClient_CreateProblem_Accepts202(t *testing.T) {
 }
 
 func TestClient_CreateProblem(t *testing.T) {
+	created := time.Date(2026, 7, 5, 10, 0, 0, 0, time.UTC)
+	updated := time.Date(2026, 7, 5, 11, 0, 0, 0, time.UTC)
 	want := ProblemResponse{
 		ID:          "p1",
 		Description: "build API",
 		Status:      "ready",
 		RepoID:      "r1",
 		IssueNumber: 5,
+		CreatedAt:   created,
+		UpdatedAt:   updated,
 		Tasks: []TaskResponse{
-			{ID: "t1", Title: "add handler", Description: "impl POST", Status: "pending"},
+			{ID: "t1", Title: "add handler", Description: "impl POST", Status: "pending", CreatedAt: created, UpdatedAt: updated},
 		},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

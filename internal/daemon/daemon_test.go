@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/llin/cttw/internal/coordinator"
+	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
@@ -36,6 +37,9 @@ func (m *mockGH) CreateSubIssue(ctx context.Context, owner, repo string, parentN
 func (m *mockGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error { return nil }
 func (m *mockGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	return 0, nil
+}
+func (m *mockGH) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
+	return nil, nil
 }
 
 func TestServer_ShutdownWaitsForWorkerLoop(t *testing.T) {

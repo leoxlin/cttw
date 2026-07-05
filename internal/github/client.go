@@ -11,12 +11,21 @@ import (
 	"time"
 )
 
+// PullRequest is a minimal GitHub pull request representation.
+type PullRequest struct {
+	Number int `json:"number"`
+	Head   struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
+}
+
 // Client provides GitHub API operations needed by cttw.
 type Client interface {
 	CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error)
 	CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error
 	CreateBranch(ctx context.Context, owner, repo, branch, base string) error
 	CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error)
+	GetPullRequest(ctx context.Context, owner, repo string, number int) (*PullRequest, error)
 }
 
 type client struct {
@@ -144,6 +153,15 @@ func (c *client) CreatePullRequest(ctx context.Context, owner, repo, title, body
 	_, err := c.do(ctx, "POST", repoPath(owner, repo, "/pulls"),
 		prRequest{Title: title, Body: body, Head: head, Base: base}, &out)
 	return out.Number, err
+}
+
+func (c *client) GetPullRequest(ctx context.Context, owner, repo string, number int) (*PullRequest, error) {
+	var out PullRequest
+	path := repoPath(owner, repo, fmt.Sprintf("/pulls/%d", number))
+	if _, err := c.do(ctx, "GET", path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func repoPath(owner, repo, suffix string) string {

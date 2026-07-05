@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
@@ -14,7 +15,10 @@ import (
 )
 
 type mockGH struct {
-	prs []struct{ Head, Base string }
+	prs            []struct{ Head, Base string }
+	getPRError     error
+	getPRBranch    string
+	getPRCalledFor int
 }
 
 func (m *mockGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) { return 0, nil }
@@ -23,6 +27,15 @@ func (m *mockGH) CreateBranch(ctx context.Context, owner, repo, branch, base str
 func (m *mockGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	m.prs = append(m.prs, struct{ Head, Base string }{head, base})
 	return 42, nil
+}
+func (m *mockGH) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
+	m.getPRCalledFor = number
+	if m.getPRError != nil {
+		return nil, m.getPRError
+	}
+	return &github.PullRequest{Number: number, Head: struct {
+		Ref string `json:"ref"`
+	}{Ref: m.getPRBranch}}, nil
 }
 
 func TestWorker_ExecuteTask_BracketsInStrings(t *testing.T) {
@@ -45,7 +58,7 @@ func TestWorker_ExecuteTask_BracketsInStrings(t *testing.T) {
 		}, nil
 	}
 
-	gh := &mockGH{}
+	gh := &mockGH{getPRBranch: "feat/add-handler"}
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
 	require.NoError(t, w.ExecuteTask(ctx, task))
 
@@ -53,6 +66,7 @@ func TestWorker_ExecuteTask_BracketsInStrings(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "completed", got.Status)
 	assert.Equal(t, 42, got.PRNumber)
+	assert.Equal(t, 42, gh.getPRCalledFor)
 }
 
 func TestWorker_ExecuteTask(t *testing.T) {
@@ -75,7 +89,7 @@ func TestWorker_ExecuteTask(t *testing.T) {
 		}, nil
 	}
 
-	gh := &mockGH{}
+	gh := &mockGH{getPRBranch: "feat/add-handler"}
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
 	require.NoError(t, w.ExecuteTask(ctx, task))
 
@@ -84,6 +98,7 @@ func TestWorker_ExecuteTask(t *testing.T) {
 	assert.Equal(t, "completed", got.Status)
 	assert.Equal(t, 42, got.PRNumber)
 	assert.Equal(t, "feat/add-handler", got.Branch)
+	assert.Equal(t, 42, gh.getPRCalledFor)
 }
 
 func TestWorker_RunOnce_AttemptCountAfterFailure(t *testing.T) {
@@ -188,4 +203,70 @@ func TestWorker_RunOnce_MissingCompletedFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "failed", got.Status)
 	assert.Contains(t, got.Output, "missing pr_number or branch")
+}
+
+func TestWorker_ExecuteTask_FailsWhenPullRequestVerificationFails(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+	task.MaxAttempts = 1
+	require.NoError(t, s.UpdateTask(ctx, task))
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{`{"pr_number":42,"branch":"feat/add-handler","status":"completed"}`},
+		}, nil
+	}
+
+	gh := &mockGH{getPRError: errors.New("pull request not found")}
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+	require.Error(t, w.RunOnce(ctx))
+
+	got, err := s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Contains(t, got.Output, "verify pull request")
+	assert.Equal(t, 42, gh.getPRCalledFor)
+}
+
+func TestWorker_ExecuteTask_FailsWhenBranchMismatch(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+	task.MaxAttempts = 1
+	require.NoError(t, s.UpdateTask(ctx, task))
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{`{"pr_number":42,"branch":"feat/add-handler","status":"completed"}`},
+		}, nil
+	}
+
+	gh := &mockGH{getPRBranch: "different-branch"}
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+	require.Error(t, w.RunOnce(ctx))
+
+	got, err := s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Contains(t, got.Output, "does not match pull request")
+	assert.Equal(t, 42, gh.getPRCalledFor)
 }

@@ -81,6 +81,38 @@ func TestCreatePullRequest(t *testing.T) {
 	assert.Equal(t, 99, n)
 }
 
+func TestGetPullRequest(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/repos/o/r/pulls/42", r.URL.Path)
+		assert.Equal(t, "token gh_token", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"number":42,"head":{"ref":"feat/x"}}`))
+	}))
+	defer ts.Close()
+
+	c := newWithURL("gh_token", ts.URL, ts.Client())
+	pr, err := c.GetPullRequest(context.Background(), "o", "r", 42)
+	require.NoError(t, err)
+	require.NotNil(t, pr)
+	assert.Equal(t, 42, pr.Number)
+	assert.Equal(t, "feat/x", pr.Head.Ref)
+}
+
+func TestGetPullRequest_NotFound(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/repos/o/r/pulls/42", r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer ts.Close()
+
+	c := newWithURL("gh_token", ts.URL, ts.Client())
+	_, err := c.GetPullRequest(context.Background(), "o", "r", 42)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "404")
+}
+
 func TestNew_DefaultTimeout(t *testing.T) {
 	c := New("token", nil)
 	require.NotNil(t, c)

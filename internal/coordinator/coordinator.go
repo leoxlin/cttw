@@ -188,6 +188,7 @@ Do not include markdown fences or explanation.`, owner, name, description)
 		}
 		t.IssueNumber = childNumber
 		if err := c.store.UpdateTask(bg, t); err != nil {
+			markFailed()
 			log.Printf("coordinator update task issue number: %v", err)
 			return
 		}

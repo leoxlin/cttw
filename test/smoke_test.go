@@ -11,6 +11,7 @@ import (
 
 	"github.com/llin/cttw/internal/config"
 	"github.com/llin/cttw/internal/coordinator"
+	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
@@ -31,6 +32,11 @@ func (s *smokeGH) CreateSubIssue(ctx context.Context, owner, repo string, parent
 func (s *smokeGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error { return nil }
 func (s *smokeGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	return 1, nil
+}
+func (s *smokeGH) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
+	return &github.PullRequest{Number: number, Head: struct {
+		Ref string `json:"ref"`
+	}{Ref: "feat/smoke"}}, nil
 }
 
 func TestIntegration_FakeACPAgent(t *testing.T) {
