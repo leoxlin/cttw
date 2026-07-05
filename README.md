@@ -5,7 +5,7 @@ A TUI CLI + daemon that coordinates ACP agents to break user problems into tasks
 ## Quick Start
 
 ```bash
-export GITHUB_TOKEN=...
+export GITHUB_TOKEN=...   # optional if `gh auth token` is available
 export CTTW_REPO=owner/repo
 # Install an ACP-compatible agent adapter, e.g.:
 #   https://github.com/zed-industries/codex-acp
@@ -19,7 +19,8 @@ form; the branch defaults to `main` when omitted.
 
 ## Configuration
 
-Environment variables or `~/.config/cttw/config.toml`:
+Environment variables or `~/.config/cttw/config.toml`.
+If `github_token` is not set, cttw will try to infer it from `gh auth token`:
 
 ```toml
 [[repos]]
@@ -35,7 +36,7 @@ prompt_timeout = "10m"
 type = "local"
 command = "codex-acp"
 
-github_token = "..."
+github_token = "..."        # optional if `gh auth token` is available
 daemon_socket = "unix:///tmp/cttw.sock"
 ```
 

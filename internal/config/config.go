@@ -1,14 +1,26 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
 )
+
+// ghAuthToken runs `gh auth token` to infer a GitHub token from the GitHub CLI.
+// It is a package variable so tests can stub it out.
+var ghAuthToken = func() (string, error) {
+	out, err := exec.Command("gh", "auth", "token").Output()
+	if err != nil {
+		return "", err
+	}
+	return string(bytes.TrimSpace(out)), nil
+}
 
 type Config struct {
 	GitHubToken  string       `toml:"github_token"`
@@ -70,6 +82,11 @@ func Load(path string, env map[string]string) (*Config, error) {
 	}
 	if v := env["GITHUB_TOKEN"]; v != "" {
 		cfg.GitHubToken = v
+	}
+	if cfg.GitHubToken == "" {
+		if tok, err := ghAuthToken(); err == nil && tok != "" {
+			cfg.GitHubToken = tok
+		}
 	}
 	if v := env["DAEMON_SOCKET"]; v != "" {
 		cfg.DaemonSocket = v

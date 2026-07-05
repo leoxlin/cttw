@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -197,4 +198,37 @@ func TestLoad_MissingHomeDirIsNotError(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "tok", cfg.GitHubToken)
+}
+
+func TestLoad_InferTokenFromGh(t *testing.T) {
+	orig := ghAuthToken
+	ghAuthToken = func() (string, error) { return "gh_inferred", nil }
+	defer func() { ghAuthToken = orig }()
+
+	cfg, err := Load("", map[string]string{"CTTW_REPO": "o/r"})
+	require.NoError(t, err)
+	assert.Equal(t, "gh_inferred", cfg.GitHubToken)
+}
+
+func TestLoad_EnvTokenOverridesGhInference(t *testing.T) {
+	orig := ghAuthToken
+	ghAuthToken = func() (string, error) { return "gh_inferred", nil }
+	defer func() { ghAuthToken = orig }()
+
+	cfg, err := Load("", map[string]string{
+		"GITHUB_TOKEN": "env_token",
+		"CTTW_REPO":    "o/r",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "env_token", cfg.GitHubToken)
+}
+
+func TestLoad_GhInferenceFailureStillRequiresToken(t *testing.T) {
+	orig := ghAuthToken
+	ghAuthToken = func() (string, error) { return "", fmt.Errorf("not logged in") }
+	defer func() { ghAuthToken = orig }()
+
+	_, err := Load("", map[string]string{"CTTW_REPO": "o/r"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "github_token is required")
 }
