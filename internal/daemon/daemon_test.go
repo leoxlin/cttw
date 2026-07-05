@@ -69,12 +69,12 @@ func TestServer_ShutdownWaitsForWorkerLoop(t *testing.T) {
 		}, nil
 	}
 
-	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
 		Store:              s,
-		Coordinator:        coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex"),
+		Coordinator:        coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute),
 		Worker:             w,
 		Socket:             "unix://" + sockFile,
 		shutdown:           make(chan struct{}),
@@ -121,8 +121,38 @@ func TestServer_CreateProblem_MapsClientErrorsTo400(t *testing.T) {
 	}
 	gh := &mockGH{issues: make(map[string]int)}
 	regRoot := filepath.Join(t.TempDir(), "repos")
-	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
-	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
+	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
+
+	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
+	srv := &Server{
+		Store:       s,
+		Coordinator: coord,
+		Worker:      w,
+		Socket:      "unix://" + sockFile,
+		shutdown:    make(chan struct{}),
+	}
+
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(srv.Shutdown)
+	waitForSocket(t, sockFile)
+
+	body, _ := json.Marshal(map[string]string{"owner": "llin", "repo": "cttw", "description": "build API"})
+	resp, err := unixPost(sockFile, "/api/v1/problems", body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestServer_CreateProblem_MapsRepoErrorTo400(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ml := &launcher.MockLauncher{}
+	gh := &mockGH{issues: make(map[string]int)}
+	regRoot := filepath.Join(t.TempDir(), "repos")
+	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -163,8 +193,8 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 
 	gh := &mockGH{issues: make(map[string]int)}
 	regRoot := filepath.Join(t.TempDir(), "repos")
-	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
-	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex")
+	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -182,7 +212,7 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{"owner": "llin", "repo": "cttw", "description": "build API"})
 	resp, err := unixPost(sockFile, "/api/v1/problems", body)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var problemResp problemResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&problemResp))

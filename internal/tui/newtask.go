@@ -14,6 +14,11 @@ type newTaskModel struct {
 	socket   string
 	err      error
 	sent     bool
+	done     bool
+}
+
+type submitProblemMsg struct {
+	err error
 }
 
 func newNewTask(socket string) newTaskModel {
@@ -35,10 +40,22 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+d":
 			value := n.textarea.Value()
 			if value != "" {
-				go n.submit(value)
 				n.sent = true
+				n.err = nil
+				n.done = false
+				return n, n.submit(value)
 			}
 		}
+	case submitProblemMsg:
+		n.sent = false
+		if msg.err != nil {
+			n.err = msg.err
+			n.done = false
+			return n, nil
+		}
+		n.err = nil
+		n.done = true
+		return n, func() tea.Msg { return switchToDashboardMsg{} }
 	}
 	m, cmd := n.textarea.Update(msg)
 	n.textarea = m
@@ -47,23 +64,31 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (n newTaskModel) View() string {
+	if n.done {
+		return "Problem created.\n\n[esc] back"
+	}
 	if n.sent {
 		return "Submitting...\n\n[esc] back"
 	}
-	return "New Problem (ctrl+d to submit, esc to cancel)\n\n" + n.textarea.View()
+	view := "New Problem (ctrl+d to submit, esc to cancel)\n\n" + n.textarea.View()
+	if n.err != nil {
+		view += "\n\nError: " + n.err.Error()
+	}
+	return view
 }
 
-func (n *newTaskModel) submit(value string) {
-	parts := strings.SplitN(value, " ", 2)
-	if len(parts) != 2 {
-		n.err = fmt.Errorf("input must be owner/repo description")
-		return
+func (n newTaskModel) submit(value string) tea.Cmd {
+	return func() tea.Msg {
+		parts := strings.SplitN(value, " ", 2)
+		if len(parts) != 2 {
+			return submitProblemMsg{err: fmt.Errorf("input must be owner/repo description")}
+		}
+		repoParts := strings.Split(parts[0], "/")
+		if len(repoParts) != 2 {
+			return submitProblemMsg{err: fmt.Errorf("repo must be owner/name")}
+		}
+		client := api.NewClient(n.socket)
+		_, err := client.CreateProblem(repoParts[0], repoParts[1], parts[1])
+		return submitProblemMsg{err: err}
 	}
-	repoParts := strings.Split(parts[0], "/")
-	if len(repoParts) != 2 {
-		n.err = fmt.Errorf("repo must be owner/name")
-		return
-	}
-	client := api.NewClient(n.socket)
-	_, n.err = client.CreateProblem(repoParts[0], repoParts[1], parts[1])
 }

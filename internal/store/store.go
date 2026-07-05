@@ -48,55 +48,94 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+type migration struct {
+	version int
+	name    string
+	stmts   []string
+}
+
+var migrations = []migration{
+	{
+		version: 1,
+		name:    "repos_problems_tasks",
+		stmts: []string{
+			`DROP TABLE IF EXISTS chunks;`,
+			`DROP TABLE IF EXISTS jobs;`,
+			`DROP TABLE IF EXISTS tasks;`,
+			`DROP TABLE IF EXISTS config;`,
+			`CREATE TABLE IF NOT EXISTS repos (
+				id TEXT PRIMARY KEY,
+				owner TEXT NOT NULL,
+				name TEXT NOT NULL,
+				local_dir TEXT NOT NULL,
+				default_branch TEXT NOT NULL,
+				clone_url TEXT,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				UNIQUE(owner, name)
+			);`,
+			`CREATE TABLE IF NOT EXISTS problems (
+				id TEXT PRIMARY KEY,
+				description TEXT NOT NULL,
+				status TEXT NOT NULL,
+				repo_id TEXT NOT NULL REFERENCES repos(id),
+				parent_issue_number INTEGER,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			);`,
+			`CREATE TABLE IF NOT EXISTS tasks (
+				id TEXT PRIMARY KEY,
+				problem_id TEXT NOT NULL REFERENCES problems(id),
+				repo_id TEXT NOT NULL REFERENCES repos(id),
+				title TEXT NOT NULL,
+				description TEXT NOT NULL,
+				status TEXT NOT NULL,
+				agent_session_id TEXT,
+				branch TEXT,
+				base_branch TEXT,
+				pr_number INTEGER,
+				issue_number INTEGER,
+				output TEXT,
+				attempts INTEGER NOT NULL DEFAULT 0,
+				max_attempts INTEGER NOT NULL DEFAULT 3,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			);`,
+		},
+	},
+}
+
 func migrate(db *sql.DB) error {
-	stmts := []string{
-		`DROP TABLE IF EXISTS chunks;`,
-		`DROP TABLE IF EXISTS jobs;`,
-		`DROP TABLE IF EXISTS tasks;`,
-		`DROP TABLE IF EXISTS config;`,
-		`CREATE TABLE IF NOT EXISTS repos (
-			id TEXT PRIMARY KEY,
-			owner TEXT NOT NULL,
-			name TEXT NOT NULL,
-			local_dir TEXT NOT NULL,
-			default_branch TEXT NOT NULL,
-			clone_url TEXT,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			UNIQUE(owner, name)
-		);`,
-		`CREATE TABLE IF NOT EXISTS problems (
-			id TEXT PRIMARY KEY,
-			description TEXT NOT NULL,
-			status TEXT NOT NULL,
-			repo_id TEXT NOT NULL REFERENCES repos(id),
-			parent_issue_number INTEGER,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS tasks (
-			id TEXT PRIMARY KEY,
-			problem_id TEXT NOT NULL REFERENCES problems(id),
-			repo_id TEXT NOT NULL REFERENCES repos(id),
-			title TEXT NOT NULL,
-			description TEXT NOT NULL,
-			status TEXT NOT NULL,
-			agent_session_id TEXT,
-			branch TEXT,
-			base_branch TEXT,
-			pr_number INTEGER,
-			issue_number INTEGER,
-			output TEXT,
-			attempts INTEGER NOT NULL DEFAULT 0,
-			max_attempts INTEGER NOT NULL DEFAULT 3,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL
-		);`,
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at DATETIME NOT NULL
+	);`); err != nil {
+		return fmt.Errorf("create schema_version: %w", err)
 	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			return err
+
+	var current int
+	row := db.QueryRow(`SELECT version FROM schema_version ORDER BY version DESC LIMIT 1`)
+	if err := row.Scan(&current); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("read schema_version: %w", err)
+	}
+
+	for _, m := range migrations {
+		if m.version <= current {
+			continue
 		}
+		for _, stmt := range m.stmts {
+			if _, err := db.Exec(stmt); err != nil {
+				return fmt.Errorf("migration %d (%s): %w", m.version, m.name, err)
+			}
+		}
+		if _, err := db.Exec(
+			`INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)`,
+			m.version, m.name, time.Now().UTC(),
+		); err != nil {
+			return fmt.Errorf("record migration %d: %w", m.version, err)
+		}
+		current = m.version
 	}
 	return nil
 }

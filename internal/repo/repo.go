@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/llin/cttw/internal/gitexec"
 )
@@ -43,6 +45,15 @@ func (r *Registry) Ensure(ctx context.Context, owner, name, defaultBranch, token
 		return nil, fmt.Errorf("stat repo dir: %w", err)
 	}
 
+	// Verify the existing directory is actually the requested repository.
+	remote, err := (&gitexec.Runner{Dir: dir}).Output("config", "--get", "remote.origin.url")
+	if err != nil {
+		return nil, fmt.Errorf("read remote origin url: %w", err)
+	}
+	if !remoteMatches(string(remote), owner, name) {
+		return nil, fmt.Errorf("repo at %s does not match %s/%s", dir, owner, name)
+	}
+
 	// Keep remote refs up to date; do not touch the working tree.
 	if err := (&gitexec.Runner{Dir: dir}).Run("remote", "update"); err != nil {
 		return nil, fmt.Errorf("remote update: %w", err)
@@ -54,4 +65,22 @@ func (r *Registry) Ensure(ctx context.Context, owner, name, defaultBranch, token
 		Dir:           dir,
 		DefaultBranch: defaultBranch,
 	}, nil
+}
+
+// remoteMatches reports whether a git remote URL points to the given
+// github.com owner/name repository. It accepts HTTPS and SSH forms, with or
+// without a trailing .git.
+func remoteMatches(remote, owner, name string) bool {
+	remote = strings.TrimSpace(remote)
+	if remote == "" {
+		return false
+	}
+	// Normalize SSH form to HTTPS-like path for matching.
+	remote = strings.TrimPrefix(remote, "git@github.com:")
+	remote = strings.TrimPrefix(remote, "https://github.com/")
+	remote = strings.TrimPrefix(remote, "http://github.com/")
+	remote = strings.TrimSuffix(remote, ".git")
+	want := owner + "/" + name
+	matched, _ := regexp.MatchString(`^`+regexp.QuoteMeta(want)+`(?:/.*)?$`, remote)
+	return matched
 }

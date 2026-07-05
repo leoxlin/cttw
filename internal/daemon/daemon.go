@@ -56,8 +56,8 @@ func Run() error {
 	}
 
 	ln := launcher.NewCodexLauncher(cfg)
-	coord := coordinator.New(s, ln, reg, gh, cfg.Agent.DefaultBackend)
-	w := worker.New(s, ln, reg, gh, cfg.Agent.DefaultBackend)
+	coord := coordinator.New(s, ln, reg, gh, cfg.Agent.DefaultBackend, cfg.Agent.PromptTimeoutDuration())
+	w := worker.New(s, ln, reg, gh, cfg.Agent.DefaultBackend, cfg.Agent.PromptTimeoutDuration())
 
 	srv := &Server{
 		Store:       s,
@@ -180,17 +180,18 @@ func (s *Server) handleCreateProblem(w http.ResponseWriter, r *http.Request) {
 	problem, err := s.Coordinator.CreateProblem(r.Context(), req.Owner, req.Repo, req.Description)
 	if err != nil {
 		switch {
-		case errors.Is(err, coordinator.ErrRepoNotRegistered),
-			errors.Is(err, coordinator.ErrGitHubFailed),
-			errors.Is(err, coordinator.ErrAgentFailed):
+		case errors.Is(err, coordinator.ErrRepoNotRegistered):
 			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, coordinator.ErrGitHubFailed),
+			errors.Is(err, coordinator.ErrAgentFailed):
+			http.Error(w, err.Error(), http.StatusBadGateway)
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(problemToResponse(problem, nil))
 }
 

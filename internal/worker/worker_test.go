@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
@@ -44,7 +45,7 @@ func TestWorker_ExecuteTask_BracketsInStrings(t *testing.T) {
 	}
 
 	gh := &mockGH{}
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex")
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
 	require.NoError(t, w.ExecuteTask(ctx, task))
 
 	got, err := s.GetTask(ctx, task.ID)
@@ -74,7 +75,7 @@ func TestWorker_ExecuteTask(t *testing.T) {
 	}
 
 	gh := &mockGH{}
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex")
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
 	require.NoError(t, w.ExecuteTask(ctx, task))
 
 	got, err := s.GetTask(ctx, task.ID)
@@ -82,4 +83,78 @@ func TestWorker_ExecuteTask(t *testing.T) {
 	assert.Equal(t, "completed", got.Status)
 	assert.Equal(t, 42, got.PRNumber)
 	assert.Equal(t, "feat/add-handler", got.Branch)
+}
+
+func TestWorker_RunOnce_AttemptCountAfterFailure(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{`{"status":"failed","error":"not today"}`},
+		}, nil
+	}
+
+	gh := &mockGH{}
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+
+	require.Error(t, w.RunOnce(ctx))
+	got, err := s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.Attempts)
+	assert.Equal(t, "pending", got.Status)
+
+	require.Error(t, w.RunOnce(ctx))
+	got, err = s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Attempts)
+	assert.Equal(t, "pending", got.Status)
+
+	require.Error(t, w.RunOnce(ctx))
+	got, err = s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, got.Attempts)
+	assert.Equal(t, "failed", got.Status)
+}
+
+func TestWorker_RunOnce_MissingCompletedFields(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+	task.MaxAttempts = 1
+	require.NoError(t, s.UpdateTask(ctx, task))
+
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		return &launcher.MockAgent{
+			Responses: []string{`{"status":"completed"}`},
+		}, nil
+	}
+
+	gh := &mockGH{}
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+	require.Error(t, w.RunOnce(ctx))
+
+	got, err := s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Contains(t, got.Output, "missing pr_number or branch")
 }

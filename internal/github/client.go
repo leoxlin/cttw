@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 )
 
 // Client provides GitHub API operations needed by cttw.
@@ -86,14 +87,14 @@ type issueResponse struct {
 
 func (c *client) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
 	var out issueResponse
-	_, err := c.do(ctx, "POST", fmt.Sprintf("/repos/%s/%s/issues", owner, repo),
+	_, err := c.do(ctx, "POST", repoPath(owner, repo, "/issues"),
 		issueRequest{Title: title, Body: body}, &out)
 	return out.Number, err
 }
 
 func (c *client) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
 	// MVP: link via markdown tasklist in parent issue body.
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, parentNumber)
+	path := repoPath(owner, repo, fmt.Sprintf("/issues/%d", parentNumber))
 	var parent issueResponse
 	if _, err := c.do(ctx, "GET", path, nil, &parent); err != nil {
 		return err
@@ -116,10 +117,10 @@ type createRefRequest struct {
 
 func (c *client) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
 	var ref refResponse
-	if _, err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", owner, repo, base), nil, &ref); err != nil {
+	if _, err := c.do(ctx, "GET", repoPath(owner, repo, fmt.Sprintf("/git/ref/heads/%s", url.PathEscape(base))), nil, &ref); err != nil {
 		return err
 	}
-	_, err := c.do(ctx, "POST", fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo),
+	_, err := c.do(ctx, "POST", repoPath(owner, repo, "/git/refs"),
 		createRefRequest{Ref: "refs/heads/" + branch, SHA: ref.Object.SHA}, nil)
 	return err
 }
@@ -137,7 +138,11 @@ type prResponse struct {
 
 func (c *client) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	var out prResponse
-	_, err := c.do(ctx, "POST", fmt.Sprintf("/repos/%s/%s/pulls", owner, repo),
+	_, err := c.do(ctx, "POST", repoPath(owner, repo, "/pulls"),
 		prRequest{Title: title, Body: body, Head: head, Base: base}, &out)
 	return out.Number, err
+}
+
+func repoPath(owner, repo, suffix string) string {
+	return fmt.Sprintf("/repos/%s/%s%s", url.PathEscape(owner), url.PathEscape(repo), suffix)
 }

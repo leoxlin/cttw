@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/llin/cttw/internal/acp"
 	"github.com/llin/cttw/internal/github"
@@ -15,18 +16,22 @@ import (
 )
 
 type Worker struct {
-	store    *store.Store
-	launcher launcher.Launcher
-	repos    *repo.Registry
-	gh       github.Client
-	backend  string
+	store         *store.Store
+	launcher      launcher.Launcher
+	repos         *repo.Registry
+	gh            github.Client
+	backend       string
+	promptTimeout time.Duration
 }
 
-func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string) *Worker {
+func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string, promptTimeout time.Duration) *Worker {
 	if backend == "" {
 		backend = "codex"
 	}
-	return &Worker{store: store, launcher: launcher, repos: repos, gh: gh, backend: backend}
+	if promptTimeout <= 0 {
+		promptTimeout = 10 * time.Minute
+	}
+	return &Worker{store: store, launcher: launcher, repos: repos, gh: gh, backend: backend, promptTimeout: promptTimeout}
 }
 
 func (w *Worker) RunOnce(ctx context.Context) error {
@@ -106,7 +111,9 @@ If you cannot complete the task, return:
 
 Return ONLY the JSON object, no markdown fences.`, r.Owner, r.Name, r.DefaultBranch, task.Title, task.Description)
 
-	res, err := agent.Prompt(ctx, prompt)
+	promptCtx, cancel := context.WithTimeout(ctx, w.promptTimeout)
+	defer cancel()
+	res, err := agent.Prompt(promptCtx, prompt)
 	if err != nil {
 		return fmt.Errorf("prompt agent: %w", err)
 	}
@@ -121,8 +128,12 @@ Return ONLY the JSON object, no markdown fences.`, r.Owner, r.Name, r.DefaultBra
 	if out.Status == "failed" {
 		task.Status = "failed"
 		task.Output = out.Error
-		task.Attempts++
 		return fmt.Errorf("task failed: %s", out.Error)
+	}
+	if out.PRNumber <= 0 || out.Branch == "" {
+		task.Status = "failed"
+		task.Output = "completed response missing pr_number or branch"
+		return fmt.Errorf("completed task missing pr_number or branch")
 	}
 	task.Status = "completed"
 	if err := w.store.UpdateTask(ctx, task); err != nil {

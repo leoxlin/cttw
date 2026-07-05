@@ -6,7 +6,9 @@
 // within the configured repository directory. Path traversal outside that
 // directory is rejected, but the agent otherwise has broad local access.
 // permission/request always returns "allowed" in the MVP because an interactive
-// prompt would block unattended daemon execution.
+// prompt would block unattended daemon execution. This is a deliberate trust
+// model: the agent runs with the user's privileges and full repo access, so
+// cttw assumes every permission request is authorized.
 package launcher
 
 import (

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/llin/cttw/internal/acp"
 	"github.com/llin/cttw/internal/github"
@@ -28,18 +30,22 @@ var (
 )
 
 type Coordinator struct {
-	store    *store.Store
-	launcher launcher.Launcher
-	repos    *repo.Registry
-	gh       github.Client
-	backend  string
+	store         *store.Store
+	launcher      launcher.Launcher
+	repos         *repo.Registry
+	gh            github.Client
+	backend       string
+	promptTimeout time.Duration
 }
 
-func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string) *Coordinator {
+func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string, promptTimeout time.Duration) *Coordinator {
 	if backend == "" {
 		backend = "codex"
 	}
-	return &Coordinator{store: store, launcher: launcher, repos: repos, gh: gh, backend: backend}
+	if promptTimeout <= 0 {
+		promptTimeout = 15 * time.Minute
+	}
+	return &Coordinator{store: store, launcher: launcher, repos: repos, gh: gh, backend: backend, promptTimeout: promptTimeout}
 }
 
 func (c *Coordinator) CreateProblem(ctx context.Context, owner, name, description string) (*store.Problem, error) {
@@ -58,14 +64,12 @@ func (c *Coordinator) CreateProblem(ctx context.Context, owner, name, descriptio
 		return nil, fmt.Errorf("create problem: %w", err)
 	}
 
-	// Create GitHub issue for the problem.
-	parentNumber, err := c.gh.CreateIssue(ctx, owner, name, description, "Coordinated by cttw.")
-	if err != nil {
-		return nil, fmt.Errorf("%w: create parent issue: %w", ErrGitHubFailed, err)
-	}
-	problem.ParentIssueNumber = parentNumber
-	if err := c.store.UpdateProblem(ctx, problem); err != nil {
-		return nil, fmt.Errorf("update problem issue number: %w", err)
+	// Helper to mark the problem failed and persist the change.
+	markFailed := func() {
+		problem.Status = "failed"
+		if err := c.store.UpdateProblem(ctx, problem); err != nil {
+			log.Printf("update problem status to failed: %v", err)
+		}
 	}
 
 	// Launch coordinator agent.
@@ -75,18 +79,21 @@ func (c *Coordinator) CreateProblem(ctx context.Context, owner, name, descriptio
 		Task:    launcher.TaskContext{ProblemDescription: description},
 	})
 	if err != nil {
+		markFailed()
 		return nil, fmt.Errorf("%w: launch coordinator agent: %w", ErrAgentFailed, err)
 	}
 	defer agent.Close(ctx)
 
 	if err := agent.Initialize(ctx); err != nil {
+		markFailed()
 		return nil, fmt.Errorf("%w: initialize agent: %w", ErrAgentFailed, err)
 	}
 	if err := agent.NewSession(ctx, acp.NewSessionRequest{CWD: r.LocalDir}); err != nil {
+		markFailed()
 		return nil, fmt.Errorf("%w: create session: %w", ErrAgentFailed, err)
 	}
 
-	// Prompt for decomposition.
+	// Prompt for decomposition with a bounded timeout.
 	prompt := fmt.Sprintf(`You are a software engineering coordinator. Break the following problem into small, implementable tasks for a single repository.
 
 Repository: %s/%s
@@ -97,24 +104,51 @@ Return ONLY a JSON array of objects, each with "title" and "description" fields.
 
 Do not include markdown fences or explanation.`, owner, name, description)
 
-	res, err := agent.Prompt(ctx, prompt)
+	promptCtx, cancel := context.WithTimeout(ctx, c.promptTimeout)
+	defer cancel()
+	res, err := agent.Prompt(promptCtx, prompt)
 	if err != nil {
+		markFailed()
 		return nil, fmt.Errorf("%w: prompt agent: %w", ErrAgentFailed, err)
 	}
 
 	tasks, err := parseTasks(res.Content)
 	if err != nil {
+		markFailed()
 		return nil, fmt.Errorf("%w: parse tasks: %w", ErrAgentFailed, err)
 	}
+	if len(tasks) == 0 {
+		markFailed()
+		return nil, fmt.Errorf("%w: decomposition returned no tasks", ErrAgentFailed)
+	}
 
-	// Create tasks and child issues.
+	// Create tasks in the store before exposing any GitHub state.
+	createdTasks := make([]*store.Task, 0, len(tasks))
 	for _, task := range tasks {
 		t, err := c.store.CreateTask(ctx, problem.ID, r.ID, task.Title, task.Description)
 		if err != nil {
+			markFailed()
 			return nil, fmt.Errorf("create task: %w", err)
 		}
-		childNumber, err := c.gh.CreateIssue(ctx, owner, name, task.Title, task.Description)
+		createdTasks = append(createdTasks, t)
+	}
+
+	// Create the parent GitHub issue only after decomposition succeeds.
+	parentNumber, err := c.gh.CreateIssue(ctx, owner, name, description, "Coordinated by cttw.")
+	if err != nil {
+		markFailed()
+		return nil, fmt.Errorf("%w: create parent issue: %w", ErrGitHubFailed, err)
+	}
+	problem.ParentIssueNumber = parentNumber
+	if err := c.store.UpdateProblem(ctx, problem); err != nil {
+		return nil, fmt.Errorf("update problem issue number: %w", err)
+	}
+
+	// Create child issues and link them to the parent.
+	for _, t := range createdTasks {
+		childNumber, err := c.gh.CreateIssue(ctx, owner, name, t.Title, t.Description)
 		if err != nil {
+			markFailed()
 			return nil, fmt.Errorf("%w: create task issue: %w", ErrGitHubFailed, err)
 		}
 		t.IssueNumber = childNumber
@@ -122,6 +156,7 @@ Do not include markdown fences or explanation.`, owner, name, description)
 			return nil, fmt.Errorf("update task issue number: %w", err)
 		}
 		if err := c.gh.CreateSubIssue(ctx, owner, name, parentNumber, childNumber); err != nil {
+			markFailed()
 			return nil, fmt.Errorf("%w: link sub-issue: %w", ErrGitHubFailed, err)
 		}
 	}

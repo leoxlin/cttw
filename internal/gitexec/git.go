@@ -1,10 +1,10 @@
 package gitexec
 
 import (
+	"encoding/base64"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
-	"strings"
 )
 
 type Runner struct {
@@ -14,8 +14,8 @@ type Runner struct {
 func run(dir string, args ...string) error {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 	return cmd.Run()
 }
 
@@ -34,9 +34,24 @@ func (r *Runner) runOutput(args ...string) ([]byte, error) {
 	return cmd.Output()
 }
 
+// Output runs a git command and returns its stdout.
+func (r *Runner) Output(args ...string) ([]byte, error) {
+	return r.runOutput(args...)
+}
+
+// Clone clones repo into dir using token for authentication. The token is not
+// embedded in the clone URL; instead it is sent via an Authorization header to
+// avoid leaking it in git output or process listings.
 func (r *Runner) Clone(repo, token, dir string) error {
-	url := strings.Replace(repo, "https://", fmt.Sprintf("https://x-access-token:%s@", token), 1)
-	return run("", "clone", url, dir)
+	auth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	header := fmt.Sprintf("Authorization: Basic %s", auth)
+	extra := fmt.Sprintf("http.https://github.com/.extraHeader=%s", header)
+
+	if err := run("", "clone", "-c", extra, repo, dir); err != nil {
+		return err
+	}
+	// Persist the auth header so subsequent remote operations use it.
+	return run(dir, "config", "http.https://github.com/.extraHeader", header)
 }
 
 func (r *Runner) Checkout(branch string) error {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -24,7 +25,21 @@ type RepoConfig struct {
 
 type AgentConfig struct {
 	DefaultBackend string                   `toml:"default_backend"`
+	PromptTimeout  string                   `toml:"prompt_timeout"`
 	Backends       map[string]BackendConfig `toml:"backends"`
+}
+
+// PromptTimeoutDuration parses PromptTimeout as a time.Duration. It returns the
+// default of 10 minutes if unset or invalid.
+func (a AgentConfig) PromptTimeoutDuration() time.Duration {
+	if a.PromptTimeout == "" {
+		return 10 * time.Minute
+	}
+	d, err := time.ParseDuration(a.PromptTimeout)
+	if err != nil {
+		return 10 * time.Minute
+	}
+	return d
 }
 
 type BackendConfig struct {
@@ -48,8 +63,10 @@ func Load(path string, env map[string]string) (*Config, error) {
 	if path == "" {
 		path = defaultConfigPath()
 	}
-	if _, err := toml.DecodeFile(path, cfg); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("load config: %w", err)
+	if path != "" {
+		if _, err := toml.DecodeFile(path, cfg); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("load config: %w", err)
+		}
 	}
 	if v := env["GITHUB_TOKEN"]; v != "" {
 		cfg.GitHubToken = v

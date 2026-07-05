@@ -7,15 +7,9 @@ import (
 
 	"github.com/llin/cttw/internal/api"
 	"github.com/llin/cttw/internal/config"
+	"github.com/llin/cttw/internal/strutil"
 	"github.com/spf13/cobra"
 )
-
-func shortID(id string) string {
-	if len(id) <= 8 {
-		return id
-	}
-	return id[:8]
-}
 
 func problemCmd() *cobra.Command {
 	return &cobra.Command{
@@ -61,7 +55,7 @@ func problemsCmd() *cobra.Command {
 				return err
 			}
 			for _, p := range problems {
-				fmt.Printf("%s  %-12s  %s\n", shortID(p.ID), p.Status, p.Description)
+				fmt.Printf("%s  %-12s  %s\n", strutil.ShortID(p.ID), p.Status, p.Description)
 			}
 			return nil
 		},

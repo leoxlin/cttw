@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/llin/cttw/internal/config"
 	"github.com/llin/cttw/internal/coordinator"
@@ -57,8 +58,8 @@ func TestIntegration_FakeACPAgent(t *testing.T) {
 	reg := &repo.Registry{Root: filepath.Join(dir, "repos")}
 	ln := launcher.NewCodexLauncher(cfg)
 	gh := &smokeGH{}
-	coord := coordinator.New(s, ln, reg, gh, "codex")
-	w := worker.New(s, ln, reg, gh, "codex")
+	coord := coordinator.New(s, ln, reg, gh, "codex", time.Minute)
+	w := worker.New(s, ln, reg, gh, "codex", time.Minute)
 
 	problem, err := coord.CreateProblem(ctx, "o", "r", "add smoke test")
 	require.NoError(t, err)

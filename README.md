@@ -29,6 +29,7 @@ default_branch = "main"
 
 [agent]
 default_backend = "codex"
+prompt_timeout = "10m"
 
 [agent.backends.codex]
 type = "local"
@@ -48,6 +49,15 @@ You can also point to a custom config file with `CTTW_CONFIG=/path/to/config.tom
 - **CLI/TUI** talk to the daemon over the Unix socket.
 
 cttw does not hold LLM API keys; agents are external processes that implement the [Agent Client Protocol](https://agentclientprotocol.com).
+
+## Security and Trust Model
+
+cttw runs ACP agents as local subprocesses with the same privileges as the user
+running the daemon. Agents have full read/write access to the configured
+repository directories and can execute terminal commands. Because cttw is
+designed for unattended daemon execution, the local handler auto-approves all
+`permission/request` calls from the agent. Only run cttw in environments where
+this level of access is acceptable.
 
 ## Development
 

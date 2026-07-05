@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -155,4 +156,45 @@ func TestLoad_InvalidRepoEnv(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "CTTW_REPO")
+}
+
+func TestLoad_AgentPromptTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cttw.toml")
+	content := `
+[[repos]]
+owner = "o"
+name = "r"
+
+[agent]
+default_backend = "codex"
+prompt_timeout = "5m"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	cfg, err := Load(path, map[string]string{"GITHUB_TOKEN": "tok"})
+	require.NoError(t, err)
+	assert.Equal(t, "5m", cfg.Agent.PromptTimeout)
+	assert.Equal(t, 5*time.Minute, cfg.Agent.PromptTimeoutDuration())
+}
+
+func TestLoad_AgentPromptTimeoutDefaults(t *testing.T) {
+	cfg, err := Load("", map[string]string{
+		"GITHUB_TOKEN": "tok",
+		"CTTW_REPO":    "o/r",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "", cfg.Agent.PromptTimeout)
+	assert.Equal(t, 10*time.Minute, cfg.Agent.PromptTimeoutDuration())
+}
+
+func TestLoad_MissingHomeDirIsNotError(t *testing.T) {
+	// With no config path and a missing home dir, Load should still succeed when
+	// environment variables provide the required values.
+	cfg, err := Load("__missing_home_dir__", map[string]string{
+		"GITHUB_TOKEN": "tok",
+		"CTTW_REPO":    "o/r",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "tok", cfg.GitHubToken)
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 
 	"github.com/llin/cttw/internal/api"
 	"github.com/llin/cttw/internal/config"
@@ -22,6 +23,14 @@ func daemonCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+
+				// If the daemon is already responding, report that instead of failing.
+				client := api.NewClient(cfg.DaemonSocket)
+				if err := client.Status(); err == nil {
+					fmt.Printf("daemon already running (%s)\n", cfg.DaemonSocket)
+					return nil
+				}
+
 				exe, _ := os.Executable()
 				c := exec.Command(exe, "--daemon")
 				c.Stdout = os.Stdout
@@ -29,6 +38,10 @@ func daemonCmd() *cobra.Command {
 				c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 				if err := c.Start(); err != nil {
 					return err
+				}
+
+				if err := waitForDaemon(client, 5*time.Second, 100*time.Millisecond); err != nil {
+					return fmt.Errorf("daemon did not become ready: %w", err)
 				}
 				fmt.Printf("daemon started (pid %d) on %s\n", c.Process.Pid, cfg.DaemonSocket)
 				return nil
@@ -69,4 +82,15 @@ func daemonCmd() *cobra.Command {
 		},
 	)
 	return cmd
+}
+
+func waitForDaemon(client *api.Client, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := client.Status(); err == nil {
+			return nil
+		}
+		time.Sleep(interval)
+	}
+	return fmt.Errorf("timed out after %s", timeout)
 }

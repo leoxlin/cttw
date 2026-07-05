@@ -8,6 +8,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMigrations_AreIdempotent(t *testing.T) {
+	dbPath := "file:" + t.TempDir() + "/cttw.db"
+
+	s, err := New(dbPath)
+	require.NoError(t, err)
+
+	var version int
+	row := s.db.QueryRow(`SELECT version FROM schema_version ORDER BY version DESC LIMIT 1`)
+	require.NoError(t, row.Scan(&version))
+	assert.Equal(t, 1, version)
+
+	// Insert a problem to verify tables exist.
+	ctx := context.Background()
+	repo, err := s.CreateRepo(ctx, "o", "r", "/tmp/r", "main", "")
+	require.NoError(t, err)
+	_, err = s.CreateProblem(ctx, "x", repo.ID)
+	require.NoError(t, err)
+	s.Close()
+
+	// Reopening the database should not re-apply migrations or fail.
+	s2, err := New(dbPath)
+	require.NoError(t, err)
+	defer s2.Close()
+
+	var version2 int
+	row = s2.db.QueryRow(`SELECT version FROM schema_version ORDER BY version DESC LIMIT 1`)
+	require.NoError(t, row.Scan(&version2))
+	assert.Equal(t, 1, version2)
+
+	// Data should still be present.
+	problems, err := s2.ListProblems(ctx)
+	require.NoError(t, err)
+	assert.Len(t, problems, 1)
+}
+
 func TestRepo_CRUD(t *testing.T) {
 	s, err := New(":memory:")
 	require.NoError(t, err)

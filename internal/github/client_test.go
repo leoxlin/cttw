@@ -80,3 +80,15 @@ func TestCreatePullRequest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 99, n)
 }
+
+func TestRepoPathEscapesSpecialCharacters(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/repos/o%2Fr/r/issues", r.URL.EscapedPath())
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"number":1}`))
+	}))
+	defer ts.Close()
+	c := newWithURL("token", ts.URL, ts.Client())
+	_, err := c.CreateIssue(context.Background(), "o/r", "r", "title", "body")
+	require.NoError(t, err)
+}

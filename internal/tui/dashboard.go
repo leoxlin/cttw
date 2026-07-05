@@ -4,16 +4,10 @@ import (
 	"fmt"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/llin/cttw/internal/strutil"
 )
 
 var titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-
-func shortID(id string) string {
-	if len(id) <= 8 {
-		return id
-	}
-	return id[:8]
-}
 
 func dashboardView(m *Model) string {
 	s := titleStyle.Render("cttw — Claudivicus Take The Wheel") + "\n\n"
@@ -25,7 +19,7 @@ func dashboardView(m *Model) string {
 	} else {
 		s += "Problems:\n"
 		for _, p := range m.Problems {
-			line := fmt.Sprintf("  %s  %-12s  %s", shortID(p.ID), p.Status, p.Description)
+			line := fmt.Sprintf("  %s  %-12s  %s", strutil.ShortID(p.ID), p.Status, p.Description)
 			s += truncate(line, 78) + "\n"
 		}
 		s += "\n"
