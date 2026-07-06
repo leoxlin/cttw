@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -46,6 +48,11 @@ func WithUpdateTaskError(err error) StoreOption {
 // New opens the SQLite database at dbPath and runs migrations.
 func New(dbPath string, opts ...StoreOption) (*Store, error) {
 	isMemory := dbPath == ":memory:" || strings.HasPrefix(dbPath, "file::memory:")
+	if !isMemory {
+		if err := ensureDBDir(dbPath); err != nil {
+			return nil, err
+		}
+	}
 	if !isMemory && !strings.Contains(dbPath, "_pragma=busy_timeout") {
 		if strings.Contains(dbPath, "?") {
 			dbPath += "&_pragma=busy_timeout(5000)"
@@ -72,6 +79,27 @@ func New(dbPath string, opts ...StoreOption) (*Store, error) {
 		opt(s)
 	}
 	return s, nil
+}
+
+// ensureDBDir creates the parent directory for a file-backed SQLite database
+// if it does not already exist. It skips in-memory databases and ignores
+// relative paths that resolve to the current directory.
+func ensureDBDir(dbPath string) error {
+	filePart := dbPath
+	if i := strings.Index(filePart, "?"); i >= 0 {
+		filePart = filePart[:i]
+	}
+	if strings.HasPrefix(filePart, "file:") {
+		filePart = strings.TrimPrefix(filePart, "file:")
+	}
+	dir := filepath.Dir(filePart)
+	if dir == "" || dir == "." {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create db directory: %w", err)
+	}
+	return nil
 }
 
 // Close closes the underlying database connection.

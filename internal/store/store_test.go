@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -41,6 +43,18 @@ func TestMigrations_AreIdempotent(t *testing.T) {
 	problems, err := s2.ListProblems(ctx)
 	require.NoError(t, err)
 	assert.Len(t, problems, 1)
+}
+
+func TestNew_CreatesMissingDBDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing", "nested")
+	dbPath := filepath.Join(dir, "cttw.db")
+
+	s, err := New(dbPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	_, err = os.Stat(dir)
+	require.NoError(t, err, "expected database directory to be created")
 }
 
 func TestRepo_CRUD(t *testing.T) {
