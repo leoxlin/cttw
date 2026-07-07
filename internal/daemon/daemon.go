@@ -56,7 +56,15 @@ func Run() error {
 		coordinator.WithToken(cfg.GitHubToken),
 		coordinator.WithRepoConfigs(cfg.Repos),
 	)
-	w := worker.New(s, ln, reg, gh, cfg.Agent.DefaultBackend, cfg.Agent.PromptTimeoutDuration())
+	w := worker.New(
+		s,
+		ln,
+		reg,
+		gh,
+		cfg.Agent.DefaultBackend,
+		cfg.Agent.PromptTimeoutDuration(),
+		worker.WithGitHubToken(cfg.GitHubToken),
+	)
 
 	srv := &Server{
 		Store:       s,

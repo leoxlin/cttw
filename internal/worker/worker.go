@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,21 @@ import (
 	"github.com/llin/cttw/internal/strutil"
 )
 
+type gitRunner interface {
+	Checkout(branch string) error
+	CheckoutNew(branch, base string) error
+	CommitAll(message string) (bool, error)
+	CurrentBranch() (string, error)
+	HasChanges() (bool, error)
+	Output(args ...string) ([]byte, error)
+	PushSetUpstream(branch string) error
+	ResetHardClean() error
+}
+
+type gitRunnerFactory func(dir, token string) gitRunner
+
+type Option func(*Worker)
+
 type Worker struct {
 	store         *store.Store
 	launcher      launcher.Launcher
@@ -26,16 +42,48 @@ type Worker struct {
 	gh            github.Client
 	backend       string
 	promptTimeout time.Duration
+	gitHubToken   string
+	newGitRunner  gitRunnerFactory
 }
 
-func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string, promptTimeout time.Duration) *Worker {
+func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string, promptTimeout time.Duration, opts ...Option) *Worker {
 	if backend == "" {
 		backend = "codex"
 	}
 	if promptTimeout <= 0 {
 		promptTimeout = 10 * time.Minute
 	}
-	return &Worker{store: store, launcher: launcher, repos: repos, gh: gh, backend: backend, promptTimeout: promptTimeout}
+	w := &Worker{
+		store:         store,
+		launcher:      launcher,
+		repos:         repos,
+		gh:            gh,
+		backend:       backend,
+		promptTimeout: promptTimeout,
+		newGitRunner: func(dir, token string) gitRunner {
+			return &gitexec.Runner{Dir: dir, Token: token}
+		},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(w)
+		}
+	}
+	return w
+}
+
+func WithGitHubToken(token string) Option {
+	return func(w *Worker) {
+		w.gitHubToken = token
+	}
+}
+
+func withGitRunnerFactory(factory gitRunnerFactory) Option {
+	return func(w *Worker) {
+		if factory != nil {
+			w.newGitRunner = factory
+		}
+	}
 }
 
 type taskExecutionError struct {
@@ -112,7 +160,7 @@ func (w *Worker) RunOnceForRepo(ctx context.Context, repoID string) error {
 	return nil
 }
 
-var branchUnsafe = regexp.MustCompile(`[^a-zA-Z0-9._/-]+`)
+var branchUnsafe = regexp.MustCompile(`[^a-z0-9]+`)
 
 func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	task.Status = "running"
@@ -130,19 +178,87 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 		return fmt.Errorf("get problem: %w", err)
 	}
 
-	git := &gitexec.Runner{Dir: r.LocalDir}
+	git := w.newGitRunner(r.LocalDir, w.gitHubToken)
 	branch := task.Branch
 	if branch == "" {
 		branch = taskBranchName(task)
 		task.Branch = branch
 	}
 	task.BaseBranch = r.DefaultBranch
-	if err := git.CheckoutNew(branch, r.DefaultBranch); err != nil {
-		if checkoutErr := git.Checkout(branch); checkoutErr != nil {
-			return fmt.Errorf("checkout task branch: %w", err)
-		}
+	if err := ensureTaskBranch(task, git, branch, r.DefaultBranch); err != nil {
+		task.Status = "failed"
+		task.Output = err.Error()
+		return err
 	}
 
+	out, _, err := w.runTaskLifecycle(ctx, git, r, problem, task, branch)
+	if err != nil {
+		task.Status = "failed"
+		task.Output = err.Error()
+		if strings.Contains(err.Error(), "commit failed") {
+			return terminalTaskError(err)
+		}
+		return err
+	}
+
+	task.Status = "completed"
+	task.Output = out.Summary
+	if err := w.store.UpdateTask(ctx, task); err != nil {
+		return fmt.Errorf("update task: %w", err)
+	}
+	return nil
+}
+
+func (w *Worker) runTaskLifecycle(ctx context.Context, git gitRunner, r *store.Repo, problem *store.Problem, task *store.Task, branch string) (taskResult, bool, error) {
+	resume, err := shouldResumePostCommit(task, git, r.DefaultBranch)
+	if err != nil {
+		return taskResult{}, false, err
+	}
+
+	out := taskResult{}
+	committedBranch := resume
+	if resume {
+		summary, err := headSummary(git)
+		if err != nil {
+			return taskResult{}, false, fmt.Errorf("resume task from branch: %w", err)
+		}
+		out.Status = "completed"
+		out.Summary = summary
+	} else {
+		var commitCreated bool
+		out, commitCreated, err = w.runAgentAndCommit(ctx, git, r, problem, task)
+		if err != nil {
+			return taskResult{}, commitCreated, err
+		}
+		committedBranch = commitCreated
+	}
+
+	if task.PRNumber == 0 {
+		if err := git.PushSetUpstream(branch); err != nil {
+			return taskResult{}, committedBranch, fmt.Errorf("push branch: %w", err)
+		}
+
+		prNumber, err := w.gh.CreatePullRequest(ctx, r.Owner, r.Name, task.Title, prBody(task, out), branch, r.DefaultBranch)
+		if err != nil {
+			return taskResult{}, committedBranch, fmt.Errorf("create pull request: %w", err)
+		}
+		task.PRNumber = prNumber
+	}
+
+	pr, err := w.gh.GetPullRequest(ctx, r.Owner, r.Name, task.PRNumber)
+	if err != nil {
+		return taskResult{}, committedBranch, fmt.Errorf("verify pull request: %w", err)
+	}
+	if pr == nil {
+		return taskResult{}, committedBranch, fmt.Errorf("verify pull request: pull request %d was nil", task.PRNumber)
+	}
+	if pr.Head.Ref != branch {
+		return taskResult{}, committedBranch, fmt.Errorf("task branch %q does not match pull request head %q", branch, pr.Head.Ref)
+	}
+	return out, committedBranch, nil
+}
+
+func (w *Worker) runAgentAndCommit(ctx context.Context, git gitRunner, r *store.Repo, problem *store.Problem, task *store.Task) (taskResult, bool, error) {
 	agent, err := w.launcher.Launch(ctx, launcher.LaunchSpec{
 		Backend: w.backend,
 		Repo:    launcher.RepoContext{Owner: r.Owner, Name: r.Name, DefaultBranch: r.DefaultBranch, LocalDir: r.LocalDir},
@@ -154,17 +270,17 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("launch task agent: %w", err)
+		return taskResult{}, false, fmt.Errorf("launch task agent: %w", err)
 	}
 	defer agent.Close(ctx)
 
 	setupCtx, cancel := context.WithTimeout(ctx, w.promptTimeout)
 	defer cancel()
 	if err := agent.Initialize(setupCtx); err != nil {
-		return fmt.Errorf("initialize agent: %w", err)
+		return taskResult{}, false, fmt.Errorf("initialize agent: %w", err)
 	}
 	if err := agent.NewSession(setupCtx, acp.NewSessionRequest{CWD: r.LocalDir}); err != nil {
-		return fmt.Errorf("create session: %w", err)
+		return taskResult{}, false, fmt.Errorf("create session: %w", err)
 	}
 	task.AgentSessionID = agent.SessionID()
 
@@ -175,91 +291,52 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	res, err := agent.Prompt(promptCtx, prompt)
 	if err != nil {
 		if cleanupErr := resetIfChanged(git); cleanupErr != nil {
-			return fmt.Errorf("prompt agent: %w; cleanup workspace: %v", err, cleanupErr)
+			return taskResult{}, false, fmt.Errorf("prompt agent: %w; cleanup workspace: %v", err, cleanupErr)
 		}
-		return fmt.Errorf("prompt agent: %w", err)
+		return taskResult{}, false, fmt.Errorf("prompt agent: %w", err)
 	}
 
 	out, err := parseTaskResult(res.Content)
 	if err != nil {
 		if cleanupErr := resetIfChanged(git); cleanupErr != nil {
-			return fmt.Errorf("parse task result: %w; cleanup workspace: %v", err, cleanupErr)
+			return taskResult{}, false, fmt.Errorf("parse task result: %w; cleanup workspace: %v", err, cleanupErr)
 		}
-		return fmt.Errorf("parse task result: %w", err)
+		return taskResult{}, false, fmt.Errorf("parse task result: %w", err)
 	}
 
 	if out.Status == "failed" {
 		if err := git.ResetHardClean(); err != nil {
-			return fmt.Errorf("task failed: %s; cleanup workspace: %v", out.Error, err)
+			return taskResult{}, false, fmt.Errorf("task failed: %s; cleanup workspace: %v", out.Error, err)
 		}
-		task.Status = "failed"
-		task.Output = out.Error
-		return fmt.Errorf("task failed: %s", out.Error)
+		return taskResult{}, false, fmt.Errorf("task failed: %s", out.Error)
 	}
 
 	changed, err := git.HasChanges()
 	if err != nil {
-		return fmt.Errorf("inspect git changes: %w", err)
+		return taskResult{}, false, fmt.Errorf("inspect git changes: %w", err)
 	}
 	if !changed {
 		if err := git.ResetHardClean(); err != nil {
-			return fmt.Errorf("completed task produced no changes; cleanup workspace: %v", err)
+			return taskResult{}, false, fmt.Errorf("completed task produced no changes; cleanup workspace: %v", err)
 		}
-		task.Status = "failed"
-		task.Output = "completed response produced no changes"
-		return fmt.Errorf("completed task produced no changes")
+		return taskResult{}, false, fmt.Errorf("completed task produced no changes")
 	}
 
 	committed, err := git.CommitAll(commitMessage(task, out))
 	if err != nil {
-		task.Status = "failed"
-		task.Output = err.Error()
-		return terminalTaskError(err)
+		return taskResult{}, false, err
 	}
 	if !committed {
 		if err := git.ResetHardClean(); err != nil {
-			return fmt.Errorf("completed task produced no staged changes; cleanup workspace: %v", err)
+			return taskResult{}, false, fmt.Errorf("completed task produced no staged changes; cleanup workspace: %v", err)
 		}
-		task.Status = "failed"
-		task.Output = "completed response produced no staged changes"
-		return fmt.Errorf("completed task produced no staged changes")
+		return taskResult{}, false, fmt.Errorf("completed task produced no staged changes")
 	}
 
-	if err := git.PushSetUpstream(branch); err != nil {
-		task.Status = "failed"
-		task.Output = fmt.Sprintf("push branch: %v", err)
-		return fmt.Errorf("push branch: %w", err)
-	}
-
-	prNumber, err := w.gh.CreatePullRequest(ctx, r.Owner, r.Name, task.Title, prBody(task, out), branch, r.DefaultBranch)
-	if err != nil {
-		task.Status = "failed"
-		task.Output = fmt.Sprintf("create pull request: %v", err)
-		return fmt.Errorf("create pull request: %w", err)
-	}
-	task.PRNumber = prNumber
-
-	pr, err := w.gh.GetPullRequest(ctx, r.Owner, r.Name, prNumber)
-	if err != nil {
-		task.Status = "failed"
-		task.Output = fmt.Sprintf("verify pull request: %v", err)
-		return fmt.Errorf("verify pull request: %w", err)
-	}
-	if pr.Head.Ref != branch {
-		task.Status = "failed"
-		task.Output = fmt.Sprintf("task branch %q does not match pull request head %q", branch, pr.Head.Ref)
-		return fmt.Errorf("task branch %q does not match pull request head %q", branch, pr.Head.Ref)
-	}
-
-	task.Status = "completed"
-	task.Output = out.Summary
-	if err := w.store.UpdateTask(ctx, task); err != nil {
-		return fmt.Errorf("update task: %w", err)
-	}
-	return nil
+	return out, true, nil
 }
 
-func resetIfChanged(git *gitexec.Runner) error {
+func resetIfChanged(git gitRunner) error {
 	changed, err := git.HasChanges()
 	if err != nil {
 		return err
@@ -273,25 +350,33 @@ func resetIfChanged(git *gitexec.Runner) error {
 func taskBranchName(task *store.Task) string {
 	slug := strings.ToLower(strings.TrimSpace(task.Title))
 	slug = branchUnsafe.ReplaceAllString(slug, "-")
-	slug = strings.Trim(slug, "-./")
+	slug = strings.Trim(slug, "-")
 	if slug == "" {
 		slug = "task"
 	}
 	if len(slug) > 48 {
-		slug = strings.Trim(slug[:48], "-./")
+		slug = strings.Trim(slug[:48], "-")
+	}
+	if slug == "" {
+		slug = "task"
 	}
 	return fmt.Sprintf("cttw/%s-%s", slug, strutil.ShortID(task.ID))
 }
 
 func commitMessage(task *store.Task, out taskResult) string {
+	const prefix = "cttw: "
 	summary := strings.TrimSpace(out.Summary)
 	if summary == "" {
 		summary = task.Title
 	}
-	if len(summary) > 72 {
-		summary = summary[:72]
+	maxSummary := 72 - len(prefix)
+	if maxSummary < 0 {
+		maxSummary = 0
 	}
-	return "cttw: " + summary
+	if len(summary) > maxSummary {
+		summary = strings.TrimSpace(summary[:maxSummary])
+	}
+	return prefix + summary
 }
 
 func prBody(task *store.Task, out taskResult) string {
@@ -362,4 +447,59 @@ If you cannot complete the task, return ONLY:
 {"status":"failed","error":"<reason>","summary":"<what happened>","key_learnings":["<learning for future runs>"],"verification":["<command you ran, if any>"]}
 
 No markdown fences. No prose outside the JSON object.`, owner, name, baseBranch, title, description)
+}
+
+func ensureTaskBranch(task *store.Task, git gitRunner, branch, baseBranch string) error {
+	currentBranch, err := git.CurrentBranch()
+	if err != nil {
+		return fmt.Errorf("current branch: %w", err)
+	}
+	changed, err := git.HasChanges()
+	if err != nil {
+		return fmt.Errorf("inspect git changes: %w", err)
+	}
+	if changed && currentBranch != branch {
+		return terminalTaskError(fmt.Errorf("workspace is dirty on branch %q; cannot start task branch %q", currentBranch, branch))
+	}
+	if currentBranch == branch {
+		return nil
+	}
+	if err := git.CheckoutNew(branch, baseBranch); err != nil {
+		if checkoutErr := git.Checkout(branch); checkoutErr != nil {
+			return fmt.Errorf("checkout task branch: %w", err)
+		}
+	}
+	return nil
+}
+
+func shouldResumePostCommit(task *store.Task, git gitRunner, baseBranch string) (bool, error) {
+	changed, err := git.HasChanges()
+	if err != nil {
+		return false, fmt.Errorf("inspect git changes: %w", err)
+	}
+	if changed {
+		return false, nil
+	}
+	if task.PRNumber != 0 {
+		return true, nil
+	}
+	out, err := git.Output("rev-list", "--count", fmt.Sprintf("%s..HEAD", baseBranch))
+	if err != nil {
+		return false, fmt.Errorf("inspect branch commits: %w", err)
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false, fmt.Errorf("parse branch commit count: %w", err)
+	}
+	return count > 0, nil
+}
+
+func headSummary(git gitRunner) (string, error) {
+	out, err := git.Output("log", "-1", "--pretty=%s")
+	if err != nil {
+		return "", err
+	}
+	summary := strings.TrimSpace(string(out))
+	summary = strings.TrimPrefix(summary, "cttw: ")
+	return summary, nil
 }
