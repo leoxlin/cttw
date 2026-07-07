@@ -124,21 +124,7 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	}
 	task.AgentSessionID = agent.SessionID()
 
-	prompt := fmt.Sprintf(`You are a software engineer. Implement the following task in the repository.
-
-Repository: %s/%s
-Base branch: %s
-Task: %s
-Description: %s
-
-Create a feature branch, make the necessary changes, commit, push the branch, and open a pull request targeting the base branch. Then report the result as JSON:
-
-{"pr_number": <number>, "branch": "<branch-name>", "status": "completed"}
-
-If you cannot complete the task, return:
-{"status": "failed", "error": "<reason>"}
-
-Return ONLY the JSON object, no markdown fences.`, r.Owner, r.Name, r.DefaultBranch, task.Title, task.Description)
+	prompt := buildTaskPrompt(r.Owner, r.Name, r.DefaultBranch, task.Title, task.Description)
 
 	promptCtx, cancel := context.WithTimeout(ctx, w.promptTimeout)
 	defer cancel()
@@ -151,29 +137,16 @@ Return ONLY the JSON object, no markdown fences.`, r.Owner, r.Name, r.DefaultBra
 	if err != nil {
 		return fmt.Errorf("parse task result: %w", err)
 	}
+	if out.Status == "completed" {
+		task.Status = "completed"
+		task.Output = out.Summary
+		return fmt.Errorf("managed worker lifecycle not implemented")
+	}
 
-	task.Branch = out.Branch
-	task.PRNumber = out.PRNumber
 	if out.Status == "failed" {
 		task.Status = "failed"
 		task.Output = out.Error
 		return fmt.Errorf("task failed: %s", out.Error)
-	}
-	if out.PRNumber <= 0 || out.Branch == "" {
-		task.Status = "failed"
-		task.Output = "completed response missing pr_number or branch"
-		return fmt.Errorf("completed task missing pr_number or branch")
-	}
-	pr, err := w.gh.GetPullRequest(ctx, r.Owner, r.Name, out.PRNumber)
-	if err != nil {
-		task.Status = "failed"
-		task.Output = fmt.Sprintf("verify pull request: %v", err)
-		return fmt.Errorf("verify pull request: %w", err)
-	}
-	if pr == nil || pr.Head.Ref != out.Branch {
-		task.Status = "failed"
-		task.Output = fmt.Sprintf("reported branch %q does not match pull request #%d", out.Branch, out.PRNumber)
-		return fmt.Errorf("reported branch %q does not match pull request #%d", out.Branch, out.PRNumber)
 	}
 	task.Status = "completed"
 	if err := w.store.UpdateTask(ctx, task); err != nil {
@@ -183,10 +156,12 @@ Return ONLY the JSON object, no markdown fences.`, r.Owner, r.Name, r.DefaultBra
 }
 
 type taskResult struct {
-	Status   string `json:"status"`
-	PRNumber int    `json:"pr_number"`
-	Branch   string `json:"branch"`
-	Error    string `json:"error"`
+	Status       string   `json:"status"`
+	Summary      string   `json:"summary"`
+	KeyChanges   []string `json:"key_changes_made"`
+	KeyLearnings []string `json:"key_learnings"`
+	Verification []string `json:"verification"`
+	Error        string   `json:"error"`
 }
 
 func parseTaskResult(content string) (taskResult, error) {
@@ -205,4 +180,29 @@ func parseTaskResult(content string) (taskResult, error) {
 		return taskResult{}, fmt.Errorf("unrecognized task status %q", out.Status)
 	}
 	return out, nil
+}
+
+func buildTaskPrompt(owner, name, baseBranch, title, description string) string {
+	return fmt.Sprintf(`You are a software engineer. Implement the following task in the repository.
+
+Repository: %s/%s
+Base branch: %s
+Task: %s
+Description: %s
+
+cttw owns repository management for this run:
+- Do not create branches.
+- Do not make git commits.
+- Do not push.
+- Do not open pull requests.
+
+Make the smallest verifiable code change that completes this task. Run the focused tests, build, linters, or formatters that validate the changed code when available. If you start long-running processes, stop them before finishing.
+
+When the task is complete, return ONLY this JSON object:
+{"status":"completed","summary":"<one sentence>","key_changes_made":["<logical change>"],"key_learnings":["<learning for future runs>"],"verification":["<command you ran>"]}
+
+If you cannot complete the task, return ONLY:
+{"status":"failed","error":"<reason>","summary":"<what happened>","key_learnings":["<learning for future runs>"],"verification":["<command you ran, if any>"]}
+
+No markdown fences. No prose outside the JSON object.`, owner, name, baseBranch, title, description)
 }

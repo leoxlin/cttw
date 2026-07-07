@@ -21,9 +21,15 @@ type mockGH struct {
 	getPRCalledFor int
 }
 
-func (m *mockGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) { return 0, nil }
-func (m *mockGH) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error { return nil }
-func (m *mockGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error { return nil }
+func (m *mockGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
+	return 0, nil
+}
+func (m *mockGH) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
+	return nil
+}
+func (m *mockGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
+	return nil
+}
 func (m *mockGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	m.prs = append(m.prs, struct{ Head, Base string }{head, base})
 	return 42, nil
@@ -36,6 +42,44 @@ func (m *mockGH) GetPullRequest(ctx context.Context, owner, repo string, number 
 	return &github.PullRequest{Number: number, Head: struct {
 		Ref string `json:"ref"`
 	}{Ref: m.getPRBranch}}, nil
+}
+
+func TestParseTaskResult_ManagedSchema(t *testing.T) {
+	out, err := parseTaskResult(`{
+		"status":"completed",
+		"summary":"added handler",
+		"key_changes_made":["new route"],
+		"key_learnings":["router tests cover auth"],
+		"verification":["go test ./internal/api"]
+	}`)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", out.Status)
+	assert.Equal(t, "added handler", out.Summary)
+	assert.Equal(t, []string{"new route"}, out.KeyChanges)
+	assert.Equal(t, []string{"router tests cover auth"}, out.KeyLearnings)
+	assert.Equal(t, []string{"go test ./internal/api"}, out.Verification)
+	assert.Empty(t, out.Error)
+}
+
+func TestParseTaskResult_RejectsLegacyPRFieldsAsCompletionContract(t *testing.T) {
+	out, err := parseTaskResult(`{"status":"completed","pr_number":42,"branch":"feat/x"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", out.Status)
+	assert.Empty(t, out.Summary)
+	assert.Empty(t, out.Error)
+	assert.Empty(t, out.KeyChanges)
+	assert.Empty(t, out.KeyLearnings)
+	assert.Empty(t, out.Verification)
+}
+
+func TestBuildTaskPrompt_ForbidsGitManagement(t *testing.T) {
+	prompt := buildTaskPrompt("llin", "cttw", "main", "add handler", "implement POST")
+	assert.Contains(t, prompt, "Do not create branches.")
+	assert.Contains(t, prompt, "Do not make git commits.")
+	assert.Contains(t, prompt, "Do not push.")
+	assert.Contains(t, prompt, "Do not open pull requests.")
+	assert.Contains(t, prompt, `"key_changes_made"`)
+	assert.Contains(t, prompt, `"verification"`)
 }
 
 func TestWorker_ExecuteTask_BracketsInStrings(t *testing.T) {
