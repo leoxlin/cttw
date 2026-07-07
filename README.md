@@ -1,6 +1,9 @@
-# cttw — Claudivicus Take The Wheel
+# cttw
 
-A TUI CLI + daemon that coordinates ACP agents to break user problems into tasks, tracks them via GitHub issues/sub-issues, and opens stacked PRs.
+> Claudivicus! Take the wheel.
+
+A TUI CLI + daemon that coordinates ACP agents to break user problems into
+tasks, tracks them via GitHub issues/sub-issues, and opens stacked PRs.
 
 ## Quick Start
 
