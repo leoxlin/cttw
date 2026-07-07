@@ -10,8 +10,6 @@ tasks, tracks them via GitHub issues/sub-issues, and opens stacked PRs.
 ```bash
 export GITHUB_TOKEN=...   # optional if `gh auth token` is available
 export CTTW_REPO=owner/repo
-# Install an ACP-compatible agent adapter, e.g.:
-#   https://github.com/zed-industries/codex-acp
 cttw daemon start
 cttw problem owner/repo "add OAuth2 login"
 cttw
