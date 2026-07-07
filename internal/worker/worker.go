@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/llin/cttw/internal/acp"
+	"github.com/llin/cttw/internal/gitexec"
 	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/jsonutil"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
 	"github.com/llin/cttw/internal/store"
+	"github.com/llin/cttw/internal/strutil"
 )
 
 type Worker struct {
@@ -83,6 +86,8 @@ func (w *Worker) RunOnceForRepo(ctx context.Context, repoID string) error {
 	return nil
 }
 
+var branchUnsafe = regexp.MustCompile(`[^a-zA-Z0-9._/-]+`)
+
 func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	task.Status = "running"
 	if err := w.store.UpdateTask(ctx, task); err != nil {
@@ -97,6 +102,19 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	problem, err := w.store.GetProblem(ctx, task.ProblemID)
 	if err != nil {
 		return fmt.Errorf("get problem: %w", err)
+	}
+
+	git := &gitexec.Runner{Dir: r.LocalDir}
+	branch := task.Branch
+	if branch == "" {
+		branch = taskBranchName(task)
+		task.Branch = branch
+	}
+	task.BaseBranch = r.DefaultBranch
+	if err := git.CheckoutNew(branch, r.DefaultBranch); err != nil {
+		if checkoutErr := git.Checkout(branch); checkoutErr != nil {
+			return fmt.Errorf("checkout task branch: %w", err)
+		}
 	}
 
 	agent, err := w.launcher.Launch(ctx, launcher.LaunchSpec{
@@ -130,29 +148,151 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	defer cancel()
 	res, err := agent.Prompt(promptCtx, prompt)
 	if err != nil {
+		if cleanupErr := resetIfChanged(git); cleanupErr != nil {
+			return fmt.Errorf("prompt agent: %w; cleanup workspace: %v", err, cleanupErr)
+		}
 		return fmt.Errorf("prompt agent: %w", err)
 	}
 
 	out, err := parseTaskResult(res.Content)
 	if err != nil {
+		if cleanupErr := resetIfChanged(git); cleanupErr != nil {
+			return fmt.Errorf("parse task result: %w; cleanup workspace: %v", err, cleanupErr)
+		}
 		return fmt.Errorf("parse task result: %w", err)
-	}
-	if out.Status == "completed" {
-		task.Status = "completed"
-		task.Output = out.Summary
-		return fmt.Errorf("managed worker lifecycle not implemented")
 	}
 
 	if out.Status == "failed" {
+		if err := git.ResetHardClean(); err != nil {
+			return fmt.Errorf("task failed: %s; cleanup workspace: %v", out.Error, err)
+		}
 		task.Status = "failed"
 		task.Output = out.Error
 		return fmt.Errorf("task failed: %s", out.Error)
 	}
+
+	if len(out.KeyChanges) == 0 {
+		if err := git.ResetHardClean(); err != nil {
+			return fmt.Errorf("completed task reported no changes; cleanup workspace: %v", err)
+		}
+		task.Status = "failed"
+		task.Output = "completed response reported no changes"
+		return fmt.Errorf("completed task reported no changes")
+	}
+
+	changed, err := git.HasChanges()
+	if err != nil {
+		return fmt.Errorf("inspect git changes: %w", err)
+	}
+	if !changed {
+		if err := git.ResetHardClean(); err != nil {
+			return fmt.Errorf("completed task produced no changes; cleanup workspace: %v", err)
+		}
+		task.Status = "failed"
+		task.Output = "completed response produced no changes"
+		return fmt.Errorf("completed task produced no changes")
+	}
+
+	committed, err := git.CommitAll(commitMessage(task, out))
+	if err != nil {
+		task.Status = "failed"
+		task.Output = err.Error()
+		return err
+	}
+	if !committed {
+		if err := git.ResetHardClean(); err != nil {
+			return fmt.Errorf("completed task produced no staged changes; cleanup workspace: %v", err)
+		}
+		task.Status = "failed"
+		task.Output = "completed response produced no staged changes"
+		return fmt.Errorf("completed task produced no staged changes")
+	}
+
+	if err := git.PushSetUpstream(branch); err != nil {
+		task.Status = "failed"
+		task.Output = fmt.Sprintf("push branch: %v", err)
+		return fmt.Errorf("push branch: %w", err)
+	}
+
+	prNumber, err := w.gh.CreatePullRequest(ctx, r.Owner, r.Name, task.Title, prBody(task, out), branch, r.DefaultBranch)
+	if err != nil {
+		task.Status = "failed"
+		task.Output = fmt.Sprintf("create pull request: %v", err)
+		return fmt.Errorf("create pull request: %w", err)
+	}
+	task.PRNumber = prNumber
+
+	pr, err := w.gh.GetPullRequest(ctx, r.Owner, r.Name, prNumber)
+	if err != nil {
+		task.Status = "failed"
+		task.Output = fmt.Sprintf("verify pull request: %v", err)
+		return fmt.Errorf("verify pull request: %w", err)
+	}
+	if pr.Head.Ref != branch {
+		task.Status = "failed"
+		task.Output = fmt.Sprintf("task branch %q does not match pull request head %q", branch, pr.Head.Ref)
+		return fmt.Errorf("task branch %q does not match pull request head %q", branch, pr.Head.Ref)
+	}
+
 	task.Status = "completed"
+	task.Output = out.Summary
 	if err := w.store.UpdateTask(ctx, task); err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
 	return nil
+}
+
+func resetIfChanged(git *gitexec.Runner) error {
+	changed, err := git.HasChanges()
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	return git.ResetHardClean()
+}
+
+func taskBranchName(task *store.Task) string {
+	slug := strings.ToLower(strings.TrimSpace(task.Title))
+	slug = branchUnsafe.ReplaceAllString(slug, "-")
+	slug = strings.Trim(slug, "-./")
+	if slug == "" {
+		slug = "task"
+	}
+	if len(slug) > 48 {
+		slug = strings.Trim(slug[:48], "-./")
+	}
+	return fmt.Sprintf("cttw/%s-%s", slug, strutil.ShortID(task.ID))
+}
+
+func commitMessage(task *store.Task, out taskResult) string {
+	summary := strings.TrimSpace(out.Summary)
+	if summary == "" {
+		summary = task.Title
+	}
+	if len(summary) > 72 {
+		summary = summary[:72]
+	}
+	return "cttw: " + summary
+}
+
+func prBody(task *store.Task, out taskResult) string {
+	var b strings.Builder
+	b.WriteString("Coordinated by cttw.\n\n")
+	if out.Summary != "" {
+		b.WriteString(out.Summary)
+		b.WriteString("\n\n")
+	}
+	if len(out.Verification) > 0 {
+		b.WriteString("Verification:\n")
+		for _, cmd := range out.Verification {
+			b.WriteString("- ")
+			b.WriteString(cmd)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
 }
 
 type taskResult struct {
