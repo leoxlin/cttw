@@ -46,7 +46,7 @@ You can also point to a custom config file with `CTTW_CONFIG=/path/to/config.tom
 
 - **Daemon** persists state in SQLite, registers repos, exposes a Unix-socket HTTP API, and polls for pending tasks.
 - **Coordinator** launches an ACP agent per problem to decompose it into tasks and creates GitHub issues.
-- **Worker** launches an ACP agent per task to implement it; the agent produces branches and PRs.
+- **Worker** launches an ACP agent per task to edit and validate code, while cttw owns branch creation, commits, rollback, push, and pull request creation. Agents return structured JSON describing the result; cttw commits successful diffs and resets failed or no-op diffs.
 - **CLI/TUI** talk to the daemon over the Unix socket.
 
 cttw does not hold LLM API keys; agents are external processes that implement the [Agent Client Protocol](https://agentclientprotocol.com).
@@ -59,6 +59,7 @@ repository directories and can execute terminal commands. Because cttw is
 designed for unattended daemon execution, the local handler auto-approves all
 `permission/request` calls from the agent. Only run cttw in environments where
 this level of access is acceptable.
+Agents still run with local repository access through ACP, but they are not asked to perform git management actions. cttw treats the local checkout as a managed transaction boundary and handles commit, reset, push, and PR creation itself.
 
 > **Note:** This branch uses a new SQLite schema (`repos`, `problems`, `tasks`). Legacy tables from earlier versions (`chunks`, `jobs`, `config`, and any old `tasks`) are left in place when opening an existing database but are no longer used.
 

@@ -51,3 +51,29 @@ func TestTaskResponse_JSON(t *testing.T) {
 	assert.Contains(t, string(b), `"created_at":"2026-07-05T12:00:00Z"`)
 	assert.Contains(t, string(b), `"updated_at":"2026-07-05T12:00:00Z"`)
 }
+
+func TestTaskResponse_CompletedResponseIncludesPRNumber(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	resp := TaskResponse{
+		ID:          "t1",
+		Title:       "add handler",
+		Description: "impl POST",
+		Status:      "completed",
+		PRNumber:    42,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	b, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"pr_number":42`)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	assert.Equal(t, "t1", got["id"])
+	assert.Equal(t, "add handler", got["title"])
+	assert.Equal(t, "impl POST", got["description"])
+	assert.Equal(t, "completed", got["status"])
+	assert.Equal(t, float64(42), got["pr_number"])
+	assert.Equal(t, "2026-07-05T12:00:00Z", got["created_at"])
+	assert.Equal(t, "2026-07-05T12:00:00Z", got["updated_at"])
+}

@@ -177,6 +177,7 @@ func TestWorker_ExecuteTask_ManagedLifecycleCommitsPushesAndCreatesPR(t *testing
 	assert.Equal(t, "completed", got.Status)
 	assert.Equal(t, branch, got.Branch)
 	assert.Equal(t, "main", got.BaseBranch)
+	assert.Equal(t, "added handler", got.Output)
 	assert.Equal(t, 42, got.PRNumber)
 	require.Len(t, gh.prs, 1)
 	assert.Equal(t, got.Branch, gh.prs[0].Head)

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -34,7 +35,9 @@ func (m *mockGH) CreateSubIssue(ctx context.Context, owner, repo string, parentN
 	m.subIssues = append(m.subIssues, [2]int{parentNumber, childNumber})
 	return nil
 }
-func (m *mockGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error { return nil }
+func (m *mockGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
+	return nil
+}
 func (m *mockGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	return 0, nil
 }
@@ -54,14 +57,33 @@ func (m *mockRegistry) Ensure(ctx context.Context, owner, name, defaultBranch, t
 	return &repo.Repo{Owner: owner, Name: name, Dir: m.dir, DefaultBranch: branch}, nil
 }
 
+func initDaemonGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "repo")
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	run("init", "-b", "main")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("base\n"), 0644))
+	run("add", ".")
+	run("commit", "-m", "initial")
+	return dir
+}
+
 func TestServer_ShutdownWaitsForWorkerLoop(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
 	// run() closes the store, so do not defer s.Close() here.
 
 	ctx := context.Background()
-	repoDir := filepath.Join(t.TempDir(), "repo")
-	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	repoDir := initDaemonGitRepo(t)
 	r, err := s.CreateRepo(ctx, "llin", "cttw", repoDir, "main", "")
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
@@ -124,8 +146,7 @@ func TestServer_CreateProblem_AcceptsAsync(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
-	repoDir := filepath.Join(t.TempDir(), "repo")
-	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	repoDir := initDaemonGitRepo(t)
 	_, err = s.CreateRepo(ctx, "llin", "cttw", repoDir, "main", "")
 	require.NoError(t, err)
 
@@ -199,7 +220,7 @@ func TestServer_CreateProblem_LazyRegistersRepo(t *testing.T) {
 		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
 	}
 	gh := &mockGH{issues: make(map[string]int)}
-	reg := &mockRegistry{dir: t.TempDir()}
+	reg := &mockRegistry{dir: initDaemonGitRepo(t)}
 	coord := coordinator.New(s, ml, reg, gh, "codex", time.Minute, coordinator.WithToken("tok"))
 	w := worker.New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
 
@@ -244,8 +265,7 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
-	repoDir := filepath.Join(t.TempDir(), "repo")
-	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	repoDir := initDaemonGitRepo(t)
 	_, err = s.CreateRepo(ctx, "llin", "cttw", repoDir, "main", "")
 	require.NoError(t, err)
 
@@ -307,7 +327,7 @@ func waitForSocket(t *testing.T, path string) {
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(path)
 		return err == nil
-	}, time.Second, 10*time.Millisecond)
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func unixPost(sock, path string, body []byte) (*http.Response, error) {

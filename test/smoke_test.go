@@ -20,7 +20,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type smokeGH struct{ issueCount int }
+type smokeGH struct {
+	issueCount int
+	prHead     string
+}
 
 func (s *smokeGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
 	s.issueCount++
@@ -29,21 +32,25 @@ func (s *smokeGH) CreateIssue(ctx context.Context, owner, repo, title, body stri
 func (s *smokeGH) CreateSubIssue(ctx context.Context, owner, repo string, parentNumber, childNumber int) error {
 	return nil
 }
-func (s *smokeGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error { return nil }
+func (s *smokeGH) CreateBranch(ctx context.Context, owner, repo, branch, base string) error {
+	return nil
+}
 func (s *smokeGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
+	s.prHead = head
 	return 1, nil
 }
 func (s *smokeGH) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
 	return &github.PullRequest{Number: number, Head: struct {
 		Ref string `json:"ref"`
-	}{Ref: "feat/smoke"}}, nil
+	}{Ref: s.prHead}}, nil
 }
 
 func TestIntegration_FakeACPAgent(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
+	repoDir := initSmokeGitRepo(t, filepath.Join(dir, "repo"))
 
-	fakeBin := buildFakeAgent(t, dir)
+	fakeBin := buildFakeAgent(t, dir, repoDir)
 	cfg := &config.Config{
 		GitHubToken: "token",
 		Agent: config.AgentConfig{
@@ -58,7 +65,7 @@ func TestIntegration_FakeACPAgent(t *testing.T) {
 	require.NoError(t, err)
 	defer s.Close()
 
-	_, err = s.CreateRepo(ctx, "o", "r", dir, "main", "")
+	_, err = s.CreateRepo(ctx, "o", "r", repoDir, "main", "")
 	require.NoError(t, err)
 
 	reg := &repo.Registry{Root: filepath.Join(dir, "repos")}
@@ -88,11 +95,40 @@ func TestIntegration_FakeACPAgent(t *testing.T) {
 	completed, err := s.GetTask(ctx, tasks[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, "completed", completed.Status)
-	assert.Equal(t, 42, completed.PRNumber)
-	assert.Equal(t, "feat/smoke", completed.Branch)
+	assert.Equal(t, 1, completed.PRNumber)
+	assert.NotEmpty(t, completed.Branch)
+	assert.Equal(t, completed.Branch, gh.prHead)
+	assert.FileExists(t, filepath.Join(repoDir, "smoke.txt"))
 }
 
-func buildFakeAgent(t *testing.T, dir string) string {
+func initSmokeGitRepo(t *testing.T, dir string) string {
+	t.Helper()
+	root := filepath.Dir(dir)
+	bare := filepath.Join(root, "origin.git")
+	cmd := exec.Command("git", "init", "--bare", bare)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	run("init", "-b", "main")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test")
+	run("remote", "add", "origin", bare)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("base\n"), 0644))
+	run("add", ".")
+	run("commit", "-m", "initial")
+	run("push", "-u", "origin", "main")
+	return dir
+}
+
+func buildFakeAgent(t *testing.T, dir, repoDir string) string {
 	code := `package main
 import (
 	"bufio"
@@ -133,7 +169,8 @@ func main() {
 			if call == 1 {
 				res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"stopReason\":\"end_turn\",\"content\":\"[{\\\"title\\\":\\\"add test\\\",\\\"description\\\":\\\"add a smoke test\\\"}]\"}`" + `)})
 			} else {
-				res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"stopReason\":\"end_turn\",\"content\":\"{\\\"pr_number\\\":42,\\\"branch\\\":\\\"feat/smoke\\\",\\\"status\\\":\\\"completed\\\"}\"}`" + `)})
+				_ = os.WriteFile(` + fmt.Sprintf("%q", filepath.Join(repoDir, "smoke.txt")) + `, []byte("smoke\n"), 0644)
+				res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"stopReason\":\"end_turn\",\"content\":\"{\\\"status\\\":\\\"completed\\\",\\\"summary\\\":\\\"added smoke file\\\",\\\"key_changes_made\\\":[\\\"smoke file\\\"],\\\"key_learnings\\\":[],\\\"verification\\\":[\\\"fake smoke verification\\\"]}\"}`" + `)})
 			}
 		default:
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{}`" + `)})
