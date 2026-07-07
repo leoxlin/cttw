@@ -284,7 +284,7 @@ func TestWorker_ExecuteTask_ResetsMalformedJSONAfterEdits(t *testing.T) {
 	assert.Empty(t, gitStatus(t, dir))
 }
 
-func TestWorker_ExecuteTask_ResetsNoOpCompletion(t *testing.T) {
+func TestWorker_ExecuteTask_CompletesWithRealDiffDespiteEmptyKeyChanges(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
@@ -302,17 +302,20 @@ func TestWorker_ExecuteTask_ResetsNoOpCompletion(t *testing.T) {
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
 		return &launcher.MockAgent{
 			OnPrompt: func(prompt string) {
-				require.NoError(t, os.WriteFile(filepath.Join(dir, "noop.go"), []byte("package main\n"), 0644))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "handler.go"), []byte("package main\n"), 0644))
 			},
 			Responses: []string{`{"status":"completed","summary":"nothing changed","key_changes_made":[],"key_learnings":["no-op"],"verification":[]}`},
 		}, nil
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
-	err = w.ExecuteTask(ctx, task)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no changes")
-	assert.NoFileExists(t, filepath.Join(dir, "noop.go"))
+	require.NoError(t, w.ExecuteTask(ctx, task))
+
+	got, err := s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", got.Status)
+	assert.Equal(t, 42, got.PRNumber)
+	assert.FileExists(t, filepath.Join(dir, "handler.go"))
 	assert.Empty(t, gitStatus(t, dir))
 }
 
@@ -379,6 +382,100 @@ func TestWorker_ExecuteTask_PreservesWorkspaceOnCommitFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "commit failed")
 	assert.FileExists(t, filepath.Join(dir, "handler.go"))
 	assert.NotEmpty(t, gitStatus(t, dir))
+}
+
+func TestWorker_RunOnce_PreservesCommitFailureAsFailed(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	dir := initGitRepo(t)
+	hooks := filepath.Join(dir, ".githooks")
+	require.NoError(t, os.MkdirAll(hooks, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0755))
+	runGit(t, dir, "config", "core.hooksPath", hooks)
+
+	r, err := s.CreateRepo(ctx, "llin", "cttw", dir, "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+
+	launches := 0
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		launches++
+		return &launcher.MockAgent{
+			OnPrompt: func(prompt string) {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "handler.go"), []byte("package main\n"), 0644))
+			},
+			Responses: []string{`{"status":"completed","summary":"added handler","key_changes_made":["handler"],"key_learnings":[],"verification":["go test ./..."]}`},
+		}, nil
+	}
+
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	err = w.RunOnce(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "commit failed")
+
+	got, err := s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Equal(t, 1, got.Attempts)
+	assert.FileExists(t, filepath.Join(dir, "handler.go"))
+	assert.NotEmpty(t, gitStatus(t, dir))
+
+	require.NoError(t, w.RunOnce(ctx))
+	assert.Equal(t, 1, launches)
+}
+
+func TestWorker_RunOnceForRepo_PreservesCommitFailureAsFailed(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	dir := initGitRepo(t)
+	hooks := filepath.Join(dir, ".githooks")
+	require.NoError(t, os.MkdirAll(hooks, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0755))
+	runGit(t, dir, "config", "core.hooksPath", hooks)
+
+	r, err := s.CreateRepo(ctx, "llin", "cttw", dir, "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+
+	launches := 0
+	ml := &launcher.MockLauncher{}
+	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		launches++
+		return &launcher.MockAgent{
+			OnPrompt: func(prompt string) {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "handler.go"), []byte("package main\n"), 0644))
+			},
+			Responses: []string{`{"status":"completed","summary":"added handler","key_changes_made":["handler"],"key_learnings":[],"verification":["go test ./..."]}`},
+		}, nil
+	}
+
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	err = w.RunOnceForRepo(ctx, r.ID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "commit failed")
+
+	got, err := s.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Equal(t, 1, got.Attempts)
+	assert.FileExists(t, filepath.Join(dir, "handler.go"))
+	assert.NotEmpty(t, gitStatus(t, dir))
+
+	require.NoError(t, w.RunOnceForRepo(ctx, r.ID))
+	assert.Equal(t, 1, launches)
 }
 
 func TestWorker_ExecuteTask_FailsWhenPullRequestVerificationFails(t *testing.T) {

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -37,6 +38,31 @@ func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, g
 	return &Worker{store: store, launcher: launcher, repos: repos, gh: gh, backend: backend, promptTimeout: promptTimeout}
 }
 
+type taskExecutionError struct {
+	err      error
+	terminal bool
+}
+
+func (e *taskExecutionError) Error() string {
+	return e.err.Error()
+}
+
+func (e *taskExecutionError) Unwrap() error {
+	return e.err
+}
+
+func terminalTaskError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &taskExecutionError{err: err, terminal: true}
+}
+
+func isTerminalTaskError(err error) bool {
+	var taskErr *taskExecutionError
+	return errors.As(err, &taskErr) && taskErr.terminal
+}
+
 func (w *Worker) RunOnce(ctx context.Context) error {
 	task, err := w.store.NextPendingTask(ctx)
 	if err != nil {
@@ -48,10 +74,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	if err := w.ExecuteTask(ctx, task); err != nil {
 		task.Output = err.Error()
 		task.Attempts++
-		if task.Attempts < task.MaxAttempts {
-			task.Status = "pending"
-		} else {
+		if isTerminalTaskError(err) || task.Attempts >= task.MaxAttempts {
 			task.Status = "failed"
+		} else {
+			task.Status = "pending"
 		}
 		if updateErr := w.store.UpdateTask(ctx, task); updateErr != nil {
 			return fmt.Errorf("execute task: %w; update task state: %w", err, updateErr)
@@ -73,10 +99,10 @@ func (w *Worker) RunOnceForRepo(ctx context.Context, repoID string) error {
 	if err := w.ExecuteTask(ctx, task); err != nil {
 		task.Output = err.Error()
 		task.Attempts++
-		if task.Attempts < task.MaxAttempts {
-			task.Status = "pending"
-		} else {
+		if isTerminalTaskError(err) || task.Attempts >= task.MaxAttempts {
 			task.Status = "failed"
+		} else {
+			task.Status = "pending"
 		}
 		if updateErr := w.store.UpdateTask(ctx, task); updateErr != nil {
 			return fmt.Errorf("execute task: %w; update task state: %w", err, updateErr)
@@ -171,15 +197,6 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 		return fmt.Errorf("task failed: %s", out.Error)
 	}
 
-	if len(out.KeyChanges) == 0 {
-		if err := git.ResetHardClean(); err != nil {
-			return fmt.Errorf("completed task reported no changes; cleanup workspace: %v", err)
-		}
-		task.Status = "failed"
-		task.Output = "completed response reported no changes"
-		return fmt.Errorf("completed task reported no changes")
-	}
-
 	changed, err := git.HasChanges()
 	if err != nil {
 		return fmt.Errorf("inspect git changes: %w", err)
@@ -197,7 +214,7 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	if err != nil {
 		task.Status = "failed"
 		task.Output = err.Error()
-		return err
+		return terminalTaskError(err)
 	}
 	if !committed {
 		if err := git.ResetHardClean(); err != nil {
