@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 )
 
 type Runner struct {
@@ -79,6 +80,61 @@ func (r *Runner) CheckoutNew(branch, base string) error {
 func (r *Runner) Add(files ...string) error {
 	args := append([]string{"add"}, files...)
 	return r.run(args...)
+}
+
+func (r *Runner) CurrentBranch() (string, error) {
+	out, err := r.Output("symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (r *Runner) Head() (string, error) {
+	out, err := r.Output("rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (r *Runner) HasChanges() (bool, error) {
+	out, err := r.Output("status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+func (r *Runner) AddAll() error {
+	return r.run("add", "-A")
+}
+
+func (r *Runner) CommitAll(message string) (bool, error) {
+	if err := r.AddAll(); err != nil {
+		return false, err
+	}
+	if err := r.run("diff", "--cached", "--quiet"); err == nil {
+		return false, nil
+	}
+	if err := r.run("-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-m", message); err != nil {
+		return false, fmt.Errorf("commit failed: %w", err)
+	}
+	return true, nil
+}
+
+func (r *Runner) ResetHardClean() error {
+	if err := r.run("reset", "--hard", "HEAD"); err != nil {
+		return err
+	}
+	return r.run("clean", "-fd")
+}
+
+func (r *Runner) PushSetUpstream(branch string) error {
+	if err := r.run("push", "-u", "origin", branch); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) Commit(message string) error {

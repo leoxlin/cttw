@@ -68,3 +68,75 @@ func TestRunner_Clone_DoesNotEmbedToken(t *testing.T) {
 	wantAuth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
 	assert.Contains(t, r.extraHeader(), "Authorization: Basic "+wantAuth)
 }
+
+func TestRunner_HasChangesAndResetHardClean(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{Dir: dir}
+	require.NoError(t, r.run("init", "-b", "main"))
+	require.NoError(t, r.run("config", "user.email", "test@example.com"))
+	require.NoError(t, r.run("config", "user.name", "Test"))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("one"), 0644))
+	committed, err := r.CommitAll("initial")
+	require.NoError(t, err)
+	require.True(t, committed)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("two"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("temp"), 0644))
+	changed, err := r.HasChanges()
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	require.NoError(t, r.ResetHardClean())
+	changed, err = r.HasChanges()
+	require.NoError(t, err)
+	require.False(t, changed)
+	got, err := os.ReadFile(filepath.Join(dir, "tracked.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "one", string(got))
+	assert.NoFileExists(t, filepath.Join(dir, "untracked.txt"))
+}
+
+func TestRunner_CommitAllNoopsWhenNoChanges(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{Dir: dir}
+	require.NoError(t, r.run("init", "-b", "main"))
+	require.NoError(t, r.run("config", "user.email", "test@example.com"))
+	require.NoError(t, r.run("config", "user.name", "Test"))
+
+	committed, err := r.CommitAll("empty")
+	require.NoError(t, err)
+	assert.False(t, committed)
+}
+
+func TestRunner_CommitAllDisablesSigning(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{Dir: dir}
+	require.NoError(t, r.run("init", "-b", "main"))
+	require.NoError(t, r.run("config", "user.email", "test@example.com"))
+	require.NoError(t, r.run("config", "user.name", "Test"))
+	require.NoError(t, r.run("config", "commit.gpgsign", "true"))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi"), 0644))
+
+	committed, err := r.CommitAll("signed disabled")
+	require.NoError(t, err)
+	assert.True(t, committed)
+}
+
+func TestRunner_CurrentBranchAndHead(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{Dir: dir}
+	require.NoError(t, r.run("init", "-b", "main"))
+	require.NoError(t, r.run("config", "user.email", "test@example.com"))
+	require.NoError(t, r.run("config", "user.name", "Test"))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi"), 0644))
+	committed, err := r.CommitAll("initial")
+	require.NoError(t, err)
+	require.True(t, committed)
+
+	branch, err := r.CurrentBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "main", branch)
+	head, err := r.Head()
+	require.NoError(t, err)
+	assert.Len(t, head, 40)
+}
