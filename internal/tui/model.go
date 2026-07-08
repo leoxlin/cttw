@@ -15,6 +15,12 @@ type switchToDashboardMsg struct{}
 type problemSort string
 
 const (
+	ScreenDashboard  = "dashboard"
+	ScreenNewProblem = "newtask"
+
+	screenDashboard = ScreenDashboard
+	screenNewTask   = ScreenNewProblem
+
 	sortCreatedAt   problemSort = "created"
 	sortStatus      problemSort = "status"
 	sortDescription problemSort = "description"
@@ -23,6 +29,8 @@ const (
 type Model struct {
 	Screen    string // dashboard | newtask
 	Socket    string
+	Width     int
+	Height    int
 	Problems  []api.ProblemResponse
 	Err       error
 	Loading   bool
@@ -34,14 +42,18 @@ type Model struct {
 }
 
 func New(socket string) *Model {
-	return &Model{
-		Screen:   "dashboard",
+	m := &Model{
+		Screen:   ScreenDashboard,
 		Socket:   socket,
+		Width:    defaultShellWidth,
+		Height:   defaultShellHeight,
 		Loading:  true,
 		Sort:     sortCreatedAt,
 		SortDesc: true,
 		newTask:  newNewTask(socket),
 	}
+	m.resize(defaultShellWidth, defaultShellHeight)
+	return m
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -56,20 +68,34 @@ func (m *Model) fetchProblems() tea.Msg {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.resize(msg.Width, msg.Height)
+		return m, nil
 	case tea.KeyMsg:
-		if m.Screen == "dashboard" {
+		if m.Screen == screenDashboard {
 			if handled, cmd := m.updateDashboardKey(msg); handled {
 				return m, cmd
 			}
 		}
 		switch msg.String() {
-		case "q", "ctrl+c":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "q":
+			if m.Screen == screenDashboard {
+				return m, tea.Quit
+			}
 		case "n":
-			m.Screen = "newtask"
-			return m, nil
+			if m.Screen == screenDashboard {
+				m.navigate(screenNewTask)
+				return m, nil
+			}
 		case "esc":
-			m.Screen = "dashboard"
+			if m.Screen != screenDashboard {
+				m.navigate(screenDashboard)
+				m.Loading = true
+				m.Err = nil
+				return m, m.fetchProblems
+			}
 			m.Loading = true
 			m.Err = nil
 			return m, m.fetchProblems
@@ -79,12 +105,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Err = msg.err
 		m.Loading = false
 	case switchToDashboardMsg:
-		m.Screen = "dashboard"
+		m.navigate(screenDashboard)
 		m.Loading = true
 		m.Err = nil
 		return m, m.fetchProblems
 	}
-	if m.Screen == "newtask" {
+	if m.Screen == screenNewTask {
 		updated, cmd := m.newTask.Update(msg)
 		m.newTask = updated.(newTaskModel)
 		return m, cmd
@@ -147,10 +173,29 @@ func (m *Model) cycleSort() {
 }
 
 func (m *Model) View() string {
+	content := ""
 	switch m.Screen {
-	case "newtask":
-		return m.newTask.View()
+	case screenNewTask:
+		content = m.newTask.View()
 	default:
-		return dashboardView(m)
+		content = dashboardView(m, contentWidth(m.Width))
 	}
+	return renderShell(m, content)
+}
+
+func (m *Model) navigate(screen string) {
+	m.Screen = screen
+	m.resize(m.Width, m.Height)
+}
+
+func (m *Model) resize(width, height int) {
+	if width <= 0 {
+		width = defaultShellWidth
+	}
+	if height <= 0 {
+		height = defaultShellHeight
+	}
+	m.Width = width
+	m.Height = height
+	m.newTask.SetSize(contentWidth(width), contentHeight(height))
 }

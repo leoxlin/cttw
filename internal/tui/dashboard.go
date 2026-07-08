@@ -7,58 +7,130 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/llin/cttw/internal/api"
 	"github.com/llin/cttw/internal/strutil"
 )
 
-var titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-
-func dashboardView(m *Model) string {
-	s := titleStyle.Render("cttw — Claudivicus Take The Wheel") + "\n\n"
-	s += fmt.Sprintf("Search: %s\n", searchDisplay(m))
-	s += fmt.Sprintf("Sort: %s %s\n\n", sortLabel(m.Sort), sortDirection(m.SortDesc))
+func dashboardView(m *Model, width int) string {
+	var lines []string
+	lines = append(lines, sectionTitleStyle.Render("Problems"), "")
+	lines = append(lines,
+		fmt.Sprintf("Search: %s", searchDisplay(m)),
+		fmt.Sprintf("Sort: %s %s", sortLabel(m.Sort), sortDirection(m.SortDesc)),
+		"",
+	)
 
 	if m.Loading {
-		s += "Loading problems...\n\n"
-		s += dashboardKeys(m)
-		return s
+		lines = append(lines, mutedStyle.Render("Loading problems..."), "", dashboardKeys(m))
+		return strings.Join(lines, "\n")
 	}
 
 	if m.Err != nil {
-		s += fmt.Sprintf("Error: %v\n\n", m.Err)
-		s += dashboardKeys(m)
-		return s
+		lines = append(lines, errorStyle.Render(fmt.Sprintf("Error: %v", m.Err)), "")
 	}
+
+	stats := newDashboardStats(m.Problems)
+	lines = append(lines,
+		sectionTitleStyle.Render("Project Summary"),
+		fmt.Sprintf("Problems: %d total, %d pending, %d ready, %d failed", stats.problems, stats.pendingProblems, stats.readyProblems, stats.failedProblems),
+		fmt.Sprintf("Repos:    %d tracked", stats.repos),
+	)
+	if stats.tasks > 0 {
+		lines = append(lines, fmt.Sprintf("Tasks:    %d total, %d pending, %d running, %d completed, %d failed", stats.tasks, stats.pendingTasks, stats.runningTasks, stats.completedTasks, stats.failedTasks))
+	}
+	lines = append(lines, "")
+
+	lines = append(lines,
+		sectionTitleStyle.Render("Workflows"),
+		"[n]   New problem     create work for a repository",
+		"[/]   Search          filter visible problems",
+		"[s]   Sort            change sort field",
+		"[a]   Direction       toggle sort direction",
+		"[esc] Refresh         reload daemon data",
+		"[q]   Quit            leave cttw",
+		"",
+		sectionTitleStyle.Render("Recent Problems"),
+	)
 
 	problems := visibleProblems(m)
 	if len(problems) == 0 {
 		if strings.TrimSpace(m.Search) != "" && len(m.Problems) > 0 {
-			s += "No matching problems.\n\n"
+			lines = append(lines, mutedStyle.Render("No matching problems."), "")
 		} else {
-			s += "No problems yet.\n\n"
+			lines = append(lines, mutedStyle.Render("No problems yet. Press [n] to create one."), "")
 		}
 	} else {
-		s += fmt.Sprintf("Problems (%d", len(problems))
+		count := fmt.Sprintf("Problems (%d", len(problems))
 		if len(problems) != len(m.Problems) {
-			s += fmt.Sprintf(" of %d", len(m.Problems))
+			count += fmt.Sprintf(" of %d", len(m.Problems))
 		}
-		s += "):\n"
-		s += "  ID        STATUS        ISSUE   UPDATED     DESCRIPTION\n"
+		count += ")"
+		lines = append(lines, count, helpStyle.Render("ID        Status       Issue   Updated     Description"))
 		for _, p := range problems {
-			line := fmt.Sprintf("  %-8s  %-12s  %-6s  %-10s  %s",
+			taskSummary := ""
+			if len(p.Tasks) > 0 {
+				taskSummary = fmt.Sprintf("  %d tasks", len(p.Tasks))
+			}
+			line := fmt.Sprintf("%-8s  %-11s  %-6s  %-10s  %s%s",
 				strutil.ShortID(p.ID),
 				p.Status,
 				issueLabel(p.IssueNumber),
 				dateLabel(p.UpdatedAt),
 				p.Description,
+				taskSummary,
 			)
-			s += truncate(line, 100) + "\n"
+			lines = append(lines, truncate(line, width))
 		}
-		s += "\n"
+		lines = append(lines, "")
 	}
-	s += dashboardKeys(m)
-	return s
+	lines = append(lines, helpStyle.Render(dashboardKeys(m)))
+	return strings.Join(lines, "\n")
+}
+
+type dashboardStats struct {
+	problems        int
+	repos           int
+	pendingProblems int
+	readyProblems   int
+	failedProblems  int
+	tasks           int
+	pendingTasks    int
+	runningTasks    int
+	completedTasks  int
+	failedTasks     int
+}
+
+func newDashboardStats(problems []api.ProblemResponse) dashboardStats {
+	stats := dashboardStats{problems: len(problems)}
+	repos := make(map[string]struct{})
+	for _, p := range problems {
+		if p.RepoID != "" {
+			repos[p.RepoID] = struct{}{}
+		}
+		switch p.Status {
+		case "pending":
+			stats.pendingProblems++
+		case "ready":
+			stats.readyProblems++
+		case "failed":
+			stats.failedProblems++
+		}
+		for _, t := range p.Tasks {
+			stats.tasks++
+			switch t.Status {
+			case "pending":
+				stats.pendingTasks++
+			case "running":
+				stats.runningTasks++
+			case "completed":
+				stats.completedTasks++
+			case "failed":
+				stats.failedTasks++
+			}
+		}
+	}
+	stats.repos = len(repos)
+	return stats
 }
 
 func dashboardKeys(m *Model) string {
@@ -66,7 +138,7 @@ func dashboardKeys(m *Model) string {
 	if m.searching {
 		searchKey = "[enter] finish search"
 	}
-	return fmt.Sprintf("Keys: [n] new problem  %s  [ctrl+u] clear search  [s] sort  [a] direction  [esc] refresh  [q] quit\n", searchKey)
+	return fmt.Sprintf("Keys: [n] new problem  %s  [ctrl+u] clear search  [s] sort  [a] direction  [esc] refresh  [q] quit", searchKey)
 }
 
 func searchDisplay(m *Model) string {
