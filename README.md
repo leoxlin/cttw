@@ -18,6 +18,14 @@ cttw
 `CTTW_REPO` accepts a comma-separated list of repositories in `owner/name[:branch]`
 form; the branch defaults to `main` when omitted.
 
+The TUI (`cttw` or `cttw tui`) talks to the local daemon, so start the daemon
+first with `cttw daemon start`. Available TUI actions:
+
+- `n`: open the new-problem form.
+- `ctrl+d`: submit a new problem from the form as `owner/repo description`.
+- `esc`: cancel the form or refresh the dashboard.
+- `q` or `ctrl+c`: quit.
+
 ## Configuration
 
 Environment variables or `~/.config/cttw/config.toml`.
