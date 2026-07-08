@@ -11,6 +11,7 @@ import (
 
 func TestModel_ShellRendersDashboardNavigation(t *testing.T) {
 	m := New("unix:///nonexistent")
+	m.Loading = false
 	m.Problems = []api.ProblemResponse{{
 		ID:          "1234567890abcdef",
 		Status:      "pending",

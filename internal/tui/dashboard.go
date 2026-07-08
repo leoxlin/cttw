@@ -2,7 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/llin/cttw/internal/api"
 	"github.com/llin/cttw/internal/strutil"
@@ -11,6 +14,17 @@ import (
 func dashboardView(m *Model, width int) string {
 	var lines []string
 	lines = append(lines, sectionTitleStyle.Render("Problems"), "")
+	lines = append(lines,
+		fmt.Sprintf("Search: %s", searchDisplay(m)),
+		fmt.Sprintf("Sort: %s %s", sortLabel(m.Sort), sortDirection(m.SortDesc)),
+		"",
+	)
+
+	if m.Loading {
+		lines = append(lines, mutedStyle.Render("Loading problems..."), "", dashboardKeys(m))
+		return strings.Join(lines, "\n")
+	}
+
 	if m.Err != nil {
 		lines = append(lines, errorStyle.Render(fmt.Sprintf("Error: %v", m.Err)), "")
 	}
@@ -29,26 +43,47 @@ func dashboardView(m *Model, width int) string {
 	lines = append(lines,
 		sectionTitleStyle.Render("Workflows"),
 		"[n]   New problem     create work for a repository",
+		"[/]   Search          filter visible problems",
+		"[s]   Sort            change sort field",
+		"[a]   Direction       toggle sort direction",
 		"[esc] Refresh         reload daemon data",
 		"[q]   Quit            leave cttw",
 		"",
 		sectionTitleStyle.Render("Recent Problems"),
 	)
-	if len(m.Problems) == 0 {
-		lines = append(lines, mutedStyle.Render("No problems yet. Press [n] to create one."), "")
+
+	problems := visibleProblems(m)
+	if len(problems) == 0 {
+		if strings.TrimSpace(m.Search) != "" && len(m.Problems) > 0 {
+			lines = append(lines, mutedStyle.Render("No matching problems."), "")
+		} else {
+			lines = append(lines, mutedStyle.Render("No problems yet. Press [n] to create one."), "")
+		}
 	} else {
-		lines = append(lines, helpStyle.Render("ID        Status       Description"))
-		for _, p := range m.Problems {
+		count := fmt.Sprintf("Problems (%d", len(problems))
+		if len(problems) != len(m.Problems) {
+			count += fmt.Sprintf(" of %d", len(m.Problems))
+		}
+		count += ")"
+		lines = append(lines, count, helpStyle.Render("ID        Status       Issue   Updated     Description"))
+		for _, p := range problems {
 			taskSummary := ""
 			if len(p.Tasks) > 0 {
 				taskSummary = fmt.Sprintf("  %d tasks", len(p.Tasks))
 			}
-			line := fmt.Sprintf("%-8s  %-11s  %s%s", strutil.ShortID(p.ID), p.Status, p.Description, taskSummary)
+			line := fmt.Sprintf("%-8s  %-11s  %-6s  %-10s  %s%s",
+				strutil.ShortID(p.ID),
+				p.Status,
+				issueLabel(p.IssueNumber),
+				dateLabel(p.UpdatedAt),
+				p.Description,
+				taskSummary,
+			)
 			lines = append(lines, truncate(line, width))
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, helpStyle.Render("Keys: [n] new problem  [q] quit  [esc] refresh"))
+	lines = append(lines, helpStyle.Render(dashboardKeys(m)))
 	return strings.Join(lines, "\n")
 }
 
@@ -96,6 +131,123 @@ func newDashboardStats(problems []api.ProblemResponse) dashboardStats {
 	}
 	stats.repos = len(repos)
 	return stats
+}
+
+func dashboardKeys(m *Model) string {
+	searchKey := "[/] search"
+	if m.searching {
+		searchKey = "[enter] finish search"
+	}
+	return fmt.Sprintf("Keys: [n] new problem  %s  [ctrl+u] clear search  [s] sort  [a] direction  [esc] refresh  [q] quit", searchKey)
+}
+
+func searchDisplay(m *Model) string {
+	if m.Search == "" {
+		if m.searching {
+			return "_"
+		}
+		return "-"
+	}
+	if m.searching {
+		return m.Search + "_"
+	}
+	return m.Search
+}
+
+func sortLabel(sort problemSort) string {
+	switch sort {
+	case sortStatus:
+		return "status"
+	case sortDescription:
+		return "description"
+	default:
+		return "created"
+	}
+}
+
+func sortDirection(desc bool) string {
+	if desc {
+		return "desc"
+	}
+	return "asc"
+}
+
+func visibleProblems(m *Model) []api.ProblemResponse {
+	query := strings.ToLower(strings.TrimSpace(m.Search))
+	problems := make([]api.ProblemResponse, 0, len(m.Problems))
+	for _, p := range m.Problems {
+		if query == "" || problemMatches(p, query) {
+			problems = append(problems, p)
+		}
+	}
+	sort.SliceStable(problems, func(i, j int) bool {
+		return problemLess(problems[i], problems[j], m.Sort, m.SortDesc)
+	})
+	return problems
+}
+
+func problemMatches(p api.ProblemResponse, query string) bool {
+	values := []string{
+		p.ID,
+		strutil.ShortID(p.ID),
+		p.Description,
+		p.Status,
+		p.RepoID,
+		strconv.Itoa(p.IssueNumber),
+	}
+	for _, value := range values {
+		if strings.Contains(strings.ToLower(value), query) {
+			return true
+		}
+	}
+	return false
+}
+
+func problemLess(a, b api.ProblemResponse, sort problemSort, desc bool) bool {
+	cmp := compareProblems(a, b, sort)
+	if cmp == 0 {
+		cmp = strings.Compare(a.ID, b.ID)
+	}
+	if desc {
+		return cmp > 0
+	}
+	return cmp < 0
+}
+
+func compareProblems(a, b api.ProblemResponse, sort problemSort) int {
+	switch sort {
+	case sortStatus:
+		return strings.Compare(a.Status, b.Status)
+	case sortDescription:
+		return strings.Compare(strings.ToLower(a.Description), strings.ToLower(b.Description))
+	default:
+		return compareTimes(a.CreatedAt, b.CreatedAt)
+	}
+}
+
+func compareTimes(a, b time.Time) int {
+	switch {
+	case a.Before(b):
+		return -1
+	case a.After(b):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func issueLabel(issue int) string {
+	if issue <= 0 {
+		return "-"
+	}
+	return "#" + strconv.Itoa(issue)
+}
+
+func dateLabel(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Format("2006-01-02")
 }
 
 func truncate(s string, n int) string {
