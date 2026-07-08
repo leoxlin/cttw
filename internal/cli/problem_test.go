@@ -28,7 +28,6 @@ func TestProblemCmd_PrintsAsyncMessage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "tok")
 	t.Setenv("CTTW_REPO", "llin/cttw")
 	t.Setenv("DAEMON_SOCKET", server.Listener.Addr().String())
 

@@ -14,7 +14,7 @@ func tuiCmd() *cobra.Command {
 		Use:   "tui",
 		Short: "Launch interactive TUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
+			cfg, err := config.LoadClient(os.Getenv("CTTW_CONFIG"), nil)
 			if err != nil {
 				return err
 			}
