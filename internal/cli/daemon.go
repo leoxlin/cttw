@@ -19,17 +19,23 @@ func daemonCmd() *cobra.Command {
 			Use:   "start",
 			Short: "Start the cttw daemon",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
+				clientCfg, err := config.LoadClient(os.Getenv("CTTW_CONFIG"), nil)
 				if err != nil {
 					return err
 				}
 
 				// If the daemon is already responding, report that instead of failing.
-				client := api.NewClient(cfg.DaemonSocket)
+				client := api.NewClient(clientCfg.DaemonSocket)
 				if err := client.Status(); err == nil {
-					fmt.Printf("daemon already running (%s)\n", cfg.DaemonSocket)
+					fmt.Printf("daemon already running (%s)\n", clientCfg.DaemonSocket)
 					return nil
 				}
+
+				cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
+				if err != nil {
+					return err
+				}
+				client = api.NewClient(cfg.DaemonSocket)
 
 				exe, _ := os.Executable()
 				c := exec.Command(exe, "--daemon")
@@ -51,7 +57,7 @@ func daemonCmd() *cobra.Command {
 			Use:   "stop",
 			Short: "Stop the cttw daemon",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
+				cfg, err := config.LoadClient(os.Getenv("CTTW_CONFIG"), nil)
 				if err != nil {
 					return err
 				}
@@ -67,7 +73,7 @@ func daemonCmd() *cobra.Command {
 			Use:   "status",
 			Short: "Show daemon status",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
+				cfg, err := config.LoadClient(os.Getenv("CTTW_CONFIG"), nil)
 				if err != nil {
 					return err
 				}

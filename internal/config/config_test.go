@@ -232,3 +232,33 @@ func TestLoad_GhInferenceFailureStillRequiresToken(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "github_token is required")
 }
+
+func TestLoadClient_DoesNotRequireGitHubToken(t *testing.T) {
+	orig := ghAuthToken
+	ghAuthToken = func() (string, error) {
+		t.Fatal("LoadClient should not infer a GitHub token")
+		return "", nil
+	}
+	defer func() { ghAuthToken = orig }()
+
+	cfg, err := LoadClient("", map[string]string{
+		"DAEMON_SOCKET": "localhost:1234",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "localhost:1234", cfg.DaemonSocket)
+	assert.Empty(t, cfg.GitHubToken)
+}
+
+func TestLoadClient_SkipsDaemonOnlyValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cttw.toml")
+	content := `
+[agent]
+default_backend = "missing"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	cfg, err := LoadClient(path, map[string]string{})
+	require.NoError(t, err)
+	assert.Equal(t, "missing", cfg.Agent.DefaultBackend)
+}
