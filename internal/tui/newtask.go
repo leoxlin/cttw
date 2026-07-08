@@ -72,7 +72,7 @@ func (n newTaskModel) View() string {
 	}
 	view := "New Problem (ctrl+d to submit, esc to cancel)\n\n" + n.textarea.View()
 	if n.err != nil {
-		view += "\n\nError: " + n.err.Error()
+		view += "\n\n" + requestErrorView(n.err)
 	}
 	return view
 }

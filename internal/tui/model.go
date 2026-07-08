@@ -17,6 +17,7 @@ type Model struct {
 	Socket   string
 	Problems []api.ProblemResponse
 	Err      error
+	Loading  bool
 	newTask  newTaskModel
 }
 
@@ -24,6 +25,7 @@ func New(socket string) *Model {
 	return &Model{
 		Screen:  "dashboard",
 		Socket:  socket,
+		Loading: true,
 		newTask: newNewTask(socket),
 	}
 }
@@ -48,13 +50,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Screen = "newtask"
 		case "esc":
 			m.Screen = "dashboard"
+			m.Loading = true
+			m.Err = nil
 			return m, m.fetchProblems
 		}
 	case problemsMsg:
 		m.Problems = msg.problems
 		m.Err = msg.err
+		m.Loading = false
 	case switchToDashboardMsg:
 		m.Screen = "dashboard"
+		m.Loading = true
+		m.Err = nil
 		return m, m.fetchProblems
 	}
 	if m.Screen == "newtask" {

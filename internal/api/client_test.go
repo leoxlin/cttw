@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -122,8 +124,17 @@ func TestClient_ServerError(t *testing.T) {
 	client := NewClient(server.Listener.Addr().String())
 	_, err := client.ListProblems()
 	require.Error(t, err)
+	var httpErr *HTTPError
+	require.True(t, errors.As(err, &httpErr))
+	assert.Equal(t, http.StatusBadRequest, httpErr.StatusCode)
 	assert.Contains(t, err.Error(), "400")
 	assert.Contains(t, err.Error(), "bad request details")
+}
+
+func TestIsDisconnected(t *testing.T) {
+	err := &net.OpError{Op: "dial", Err: errors.New("connect: connection refused")}
+	assert.True(t, IsDisconnected(err))
+	assert.False(t, IsDisconnected(&HTTPError{StatusCode: http.StatusInternalServerError, Body: "boom"}))
 }
 
 func TestClient_NewClientTimeout(t *testing.T) {

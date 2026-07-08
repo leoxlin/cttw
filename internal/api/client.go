@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,24 @@ import (
 )
 
 const defaultRequestTimeout = 30 * time.Second
+
+type HTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	body := strings.TrimSpace(e.Body)
+	if body == "" {
+		return fmt.Sprintf("daemon API %d", e.StatusCode)
+	}
+	return fmt.Sprintf("daemon API %d: %s", e.StatusCode, body)
+}
+
+func IsDisconnected(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
+}
 
 type Client struct {
 	Socket string
@@ -107,7 +126,7 @@ func (c *Client) get(path string) ([]byte, error) {
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("daemon %d: %s", resp.StatusCode, string(b))
+		return nil, &HTTPError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
 	return b, nil
 }
@@ -128,7 +147,7 @@ func (c *Client) post(path string, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("daemon %d: %s", resp.StatusCode, string(b))
+		return nil, &HTTPError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
 	return b, nil
 }
