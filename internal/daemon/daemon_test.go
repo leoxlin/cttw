@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -393,6 +394,40 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	require.Len(t, got.Tasks, 1)
 	assert.NotZero(t, got.Tasks[0].CreatedAt)
 	assert.NotZero(t, got.Tasks[0].UpdatedAt)
+}
+
+func TestServer_ListProblemsIncludesRepoAndTasks(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	problem.Status = "ready"
+	problem.ParentIssueNumber = 42
+	require.NoError(t, s.UpdateProblem(ctx, problem))
+	_, err = s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+	_, err = s.CreateTask(ctx, problem.ID, r.ID, "add tests", "cover POST")
+	require.NoError(t, err)
+
+	srv := &Server{Store: s}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/problems", nil)
+
+	srv.handleListProblems(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []problemResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	require.Len(t, got, 1)
+	assert.Equal(t, "llin", got[0].RepoOwner)
+	assert.Equal(t, "cttw", got[0].RepoName)
+	assert.Equal(t, 42, got[0].IssueNumber)
+	require.Len(t, got[0].Tasks, 2)
 }
 
 func TestServer_UpdateProblem(t *testing.T) {

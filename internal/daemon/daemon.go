@@ -326,9 +326,14 @@ func (s *Server) handleCreateProblem(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	repo, err := s.Store.GetRepo(r.Context(), problem.RepoID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(problemToResponse(problem, nil))
+	json.NewEncoder(w).Encode(problemToResponse(problem, nil, repo))
 }
 
 func (s *Server) handleListProblems(w http.ResponseWriter, r *http.Request) {
@@ -339,7 +344,17 @@ func (s *Server) handleListProblems(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := make([]problemResponse, 0, len(problems))
 	for i := range problems {
-		resp = append(resp, problemToResponse(&problems[i], nil))
+		repo, err := s.Store.GetRepo(r.Context(), problems[i].RepoID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		tasks, err := s.Store.ListTasksByProblem(r.Context(), problems[i].ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp = append(resp, problemToResponse(&problems[i], tasks, repo))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -361,8 +376,13 @@ func (s *Server) handleGetProblem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	repo, err := s.Store.GetRepo(r.Context(), problem.RepoID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(problemToResponse(problem, tasks))
+	json.NewEncoder(w).Encode(problemToResponse(problem, tasks, repo))
 }
 
 func (s *Server) handleUpdateProblem(w http.ResponseWriter, r *http.Request) {
@@ -393,8 +413,13 @@ func (s *Server) handleUpdateProblem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	repo, err := s.Store.GetRepo(r.Context(), problem.RepoID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(problemToResponse(problem, nil))
+	json.NewEncoder(w).Encode(problemToResponse(problem, nil, repo))
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -423,6 +448,8 @@ type problemResponse struct {
 	Description string         `json:"description"`
 	Status      string         `json:"status"`
 	RepoID      string         `json:"repo_id"`
+	RepoOwner   string         `json:"repo_owner,omitempty"`
+	RepoName    string         `json:"repo_name,omitempty"`
 	IssueNumber int            `json:"issue_number"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
@@ -452,7 +479,7 @@ func projectToResponse(r *store.Repo) projectResponse {
 	}
 }
 
-func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
+func problemToResponse(p *store.Problem, tasks []store.Task, repo *store.Repo) problemResponse {
 	resp := problemResponse{
 		ID:          p.ID,
 		Description: p.Description,
@@ -461,6 +488,10 @@ func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
 		IssueNumber: p.ParentIssueNumber,
 		CreatedAt:   p.CreatedAt,
 		UpdatedAt:   p.UpdatedAt,
+	}
+	if repo != nil {
+		resp.RepoOwner = repo.Owner
+		resp.RepoName = repo.Name
 	}
 	for _, t := range tasks {
 		resp.Tasks = append(resp.Tasks, taskResponse{
