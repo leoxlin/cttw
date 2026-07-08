@@ -169,7 +169,7 @@ func (m *Model) updateDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.Loading = true
 		m.Err = nil
 		return m, m.fetchProblems
-	case "r":
+	case "r", "f5":
 		if m.Detail != nil {
 			m.DetailLoading = true
 			m.DetailErr = nil
@@ -232,6 +232,15 @@ func (m *Model) updateDashboardKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			m.Cursor++
 		}
 		return true, nil
+	case "home", "g":
+		m.Cursor = 0
+		return true, nil
+	case "end", "G":
+		problems := visibleProblems(m)
+		if len(problems) > 0 {
+			m.Cursor = len(problems) - 1
+		}
+		return true, nil
 	case "enter", "o":
 		problems := visibleProblems(m)
 		if len(problems) > 0 {
@@ -254,7 +263,7 @@ func (m *Model) updateDashboardKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			m.navigate(screenNewTask)
 		}
 		return true, nil
-	case "esc", "r":
+	case "esc", "r", "f5":
 		m.Loading = true
 		m.Err = nil
 		return true, m.fetchProblems

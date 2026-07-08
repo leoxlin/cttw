@@ -232,6 +232,33 @@ func TestModel_EditProblemKeyOpensSelectedProblem(t *testing.T) {
 	assert.Equal(t, "second", nm.newTask.description.Value())
 }
 
+func TestModel_DashboardHomeEndAndF5Shortcuts(t *testing.T) {
+	m := New("unix:///nonexistent")
+	m.Loading = false
+	m.SortDesc = false
+	m.Problems = []api.ProblemResponse{
+		{ID: "p1", Description: "first"},
+		{ID: "p2", Description: "second"},
+		{ID: "p3", Description: "third"},
+	}
+	m.Cursor = 1
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	nm := updated.(*Model)
+	require.Nil(t, cmd)
+	assert.Equal(t, 2, nm.Cursor)
+
+	updated, cmd = nm.Update(tea.KeyMsg{Type: tea.KeyHome})
+	nm = updated.(*Model)
+	require.Nil(t, cmd)
+	assert.Equal(t, 0, nm.Cursor)
+
+	updated, cmd = nm.Update(tea.KeyMsg{Type: tea.KeyF5})
+	nm = updated.(*Model)
+	require.NotNil(t, cmd)
+	assert.True(t, nm.Loading)
+}
+
 func TestModel_WindowSizeResizesShell(t *testing.T) {
 	m := New("unix:///nonexistent")
 
