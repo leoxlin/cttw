@@ -44,6 +44,8 @@ func dashboardView(m *Model, width int) string {
 		sectionTitleStyle.Render("Workflows"),
 		"[n]   New problem     create work for a repository",
 		"[/]   Search          filter visible problems",
+		"[j/k] Select          move through problems",
+		"[enter] Details       open selected problem",
 		"[s]   Sort            change sort field",
 		"[a]   Direction       toggle sort direction",
 		"[esc] Refresh         reload daemon data",
@@ -65,13 +67,18 @@ func dashboardView(m *Model, width int) string {
 			count += fmt.Sprintf(" of %d", len(m.Problems))
 		}
 		count += ")"
-		lines = append(lines, count, helpStyle.Render("ID        Status       Issue   Updated     Description"))
-		for _, p := range problems {
+		lines = append(lines, count, helpStyle.Render("  ID        Status       Issue   Updated     Description"))
+		for i, p := range problems {
+			marker := " "
+			if i == m.Cursor {
+				marker = ">"
+			}
 			taskSummary := ""
 			if len(p.Tasks) > 0 {
 				taskSummary = fmt.Sprintf("  %d tasks", len(p.Tasks))
 			}
-			line := fmt.Sprintf("%-8s  %-11s  %-6s  %-10s  %s%s",
+			line := fmt.Sprintf("%s %-8s  %-11s  %-6s  %-10s  %s%s",
+				marker,
 				strutil.ShortID(p.ID),
 				p.Status,
 				issueLabel(p.IssueNumber),
@@ -84,6 +91,61 @@ func dashboardView(m *Model, width int) string {
 		lines = append(lines, "")
 	}
 	lines = append(lines, helpStyle.Render(dashboardKeys(m)))
+	return strings.Join(lines, "\n")
+}
+
+func detailView(m *Model) string {
+	var lines []string
+	lines = append(lines, sectionTitleStyle.Render("Problem Details"), "")
+	if m.DetailErr != nil {
+		lines = append(lines, errorStyle.Render(fmt.Sprintf("Error: %v", m.DetailErr)), "")
+	}
+	if m.Detail == nil {
+		if m.DetailLoading {
+			lines = append(lines, mutedStyle.Render("Loading problem..."), "")
+		} else {
+			lines = append(lines, mutedStyle.Render("No problem selected."), "")
+		}
+		lines = append(lines, helpStyle.Render("Actions: [b/esc] back  [q] quit"))
+		return strings.Join(lines, "\n")
+	}
+
+	p := *m.Detail
+	lines = append(lines,
+		fmt.Sprintf("ID: %s", p.ID),
+		fmt.Sprintf("Status: %s", p.Status),
+		fmt.Sprintf("Repo: %s", p.RepoID),
+		fmt.Sprintf("Issue: %s", issueLabel(p.IssueNumber)),
+		fmt.Sprintf("Created: %s", formatTime(p.CreatedAt)),
+		fmt.Sprintf("Updated: %s", formatTime(p.UpdatedAt)),
+		"",
+		"Description:",
+		indentLines(p.Description, "  "),
+		"",
+		taskSummary(p.Tasks),
+	)
+	if m.DetailLoading {
+		lines = append(lines, mutedStyle.Render("Refreshing..."))
+	}
+	lines = append(lines, helpStyle.Render("Actions: [r] refresh  [b/esc] back  [n] new problem  [q] quit"))
+	return strings.Join(lines, "\n")
+}
+
+func taskSummary(tasks []api.TaskResponse) string {
+	if len(tasks) == 0 {
+		return "Tasks: none"
+	}
+	lines := []string{fmt.Sprintf("Tasks (%d):", len(tasks))}
+	for _, t := range tasks {
+		line := fmt.Sprintf("  %s  %-12s  %s", strutil.ShortID(t.ID), t.Status, t.Title)
+		if t.PRNumber > 0 {
+			line += fmt.Sprintf("  PR: #%d", t.PRNumber)
+		}
+		lines = append(lines, truncate(line, 78))
+		if t.Description != "" {
+			lines = append(lines, truncate("    "+t.Description, 78))
+		}
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -138,7 +200,7 @@ func dashboardKeys(m *Model) string {
 	if m.searching {
 		searchKey = "[enter] finish search"
 	}
-	return fmt.Sprintf("Keys: [n] new problem  %s  [ctrl+u] clear search  [s] sort  [a] direction  [esc] refresh  [q] quit", searchKey)
+	return fmt.Sprintf("Keys: [n] new problem  %s  [ctrl+u] clear search  [j/k] select  [enter] details  [s] sort  [a] direction  [esc] refresh  [q] quit", searchKey)
 }
 
 func searchDisplay(m *Model) string {
@@ -248,6 +310,24 @@ func dateLabel(t time.Time) string {
 		return "-"
 	}
 	return t.Format("2006-01-02")
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return t.Local().Format("2006-01-02 15:04:05 MST")
+}
+
+func indentLines(s, prefix string) string {
+	if s == "" {
+		return prefix + "(empty)"
+	}
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func truncate(s string, n int) string {

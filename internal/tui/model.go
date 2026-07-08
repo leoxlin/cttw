@@ -10,6 +10,11 @@ type problemsMsg struct {
 	err      error
 }
 
+type problemDetailMsg struct {
+	problem *api.ProblemResponse
+	err     error
+}
+
 type switchToDashboardMsg struct{}
 
 type problemSort string
@@ -20,6 +25,7 @@ const (
 
 	screenDashboard = ScreenDashboard
 	screenNewTask   = ScreenNewProblem
+	screenDetail    = "detail"
 
 	sortCreatedAt   problemSort = "created"
 	sortStatus      problemSort = "status"
@@ -27,18 +33,22 @@ const (
 )
 
 type Model struct {
-	Screen    string // dashboard | newtask
-	Socket    string
-	Width     int
-	Height    int
-	Problems  []api.ProblemResponse
-	Err       error
-	Loading   bool
-	Search    string
-	searching bool
-	Sort      problemSort
-	SortDesc  bool
-	newTask   newTaskModel
+	Screen        string // dashboard | detail | newtask
+	Socket        string
+	Width         int
+	Height        int
+	Problems      []api.ProblemResponse
+	Cursor        int
+	Detail        *api.ProblemResponse
+	DetailLoading bool
+	DetailErr     error
+	Err           error
+	Loading       bool
+	Search        string
+	searching     bool
+	Sort          problemSort
+	SortDesc      bool
+	newTask       newTaskModel
 }
 
 func New(socket string) *Model {
@@ -66,44 +76,58 @@ func (m *Model) fetchProblems() tea.Msg {
 	return problemsMsg{problems: problems, err: err}
 }
 
+func (m *Model) fetchProblem(id string) tea.Cmd {
+	return func() tea.Msg {
+		client := api.NewClient(m.Socket)
+		problem, err := client.GetProblem(id)
+		return problemDetailMsg{problem: problem, err: err}
+	}
+}
+
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.resize(msg.Width, msg.Height)
 		return m, nil
 	case tea.KeyMsg:
-		if m.Screen == screenDashboard {
-			if handled, cmd := m.updateDashboardKey(msg); handled {
-				return m, cmd
-			}
-		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "q":
-			if m.Screen == screenDashboard {
-				return m, tea.Quit
-			}
-		case "n":
-			if m.Screen == screenDashboard {
-				m.navigate(screenNewTask)
-				return m, nil
-			}
-		case "esc":
-			if m.Screen != screenDashboard {
+		}
+
+		switch m.Screen {
+		case screenNewTask:
+			if msg.String() == "esc" {
 				m.navigate(screenDashboard)
 				m.Loading = true
 				m.Err = nil
 				return m, m.fetchProblems
 			}
-			m.Loading = true
-			m.Err = nil
-			return m, m.fetchProblems
+		case screenDetail:
+			return m.updateDetailKey(msg)
+		default:
+			if handled, cmd := m.updateDashboardKey(msg); handled {
+				return m, cmd
+			}
+			switch msg.String() {
+			case "q":
+				return m, tea.Quit
+			case "n":
+				m.navigate(screenNewTask)
+				return m, nil
+			}
 		}
 	case problemsMsg:
 		m.Problems = msg.problems
 		m.Err = msg.err
 		m.Loading = false
+		m.clampCursor()
+	case problemDetailMsg:
+		m.DetailLoading = false
+		m.DetailErr = msg.err
+		if msg.err == nil {
+			m.Detail = msg.problem
+		}
 	case switchToDashboardMsg:
 		m.navigate(screenDashboard)
 		m.Loading = true
@@ -114,6 +138,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		updated, cmd := m.newTask.Update(msg)
 		m.newTask = updated.(newTaskModel)
 		return m, cmd
+	}
+	return m, nil
+}
+
+func (m *Model) updateDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		return m, tea.Quit
+	case "esc", "b":
+		m.navigate(screenDashboard)
+		m.Detail = nil
+		m.DetailErr = nil
+		m.DetailLoading = false
+		m.Loading = true
+		m.Err = nil
+		return m, m.fetchProblems
+	case "r":
+		if m.Detail != nil {
+			m.DetailLoading = true
+			m.DetailErr = nil
+			return m, m.fetchProblem(m.Detail.ID)
+		}
+	case "n":
+		m.navigate(screenNewTask)
+		return m, nil
 	}
 	return m, nil
 }
@@ -137,6 +186,7 @@ func (m *Model) updateDashboardKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 				m.Search += string(msg.Runes)
 			}
 		}
+		m.clampCursor()
 		return true, nil
 	}
 
@@ -146,14 +196,38 @@ func (m *Model) updateDashboardKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		return true, nil
 	case "ctrl+u":
 		m.Search = ""
+		m.clampCursor()
 		return true, nil
 	case "s":
 		m.cycleSort()
+		m.clampCursor()
 		return true, nil
 	case "a":
 		m.SortDesc = !m.SortDesc
 		return true, nil
-	case "esc":
+	case "up", "k":
+		if m.Cursor > 0 {
+			m.Cursor--
+		}
+		return true, nil
+	case "down", "j":
+		if m.Cursor < len(visibleProblems(m))-1 {
+			m.Cursor++
+		}
+		return true, nil
+	case "enter", "o":
+		problems := visibleProblems(m)
+		if len(problems) > 0 {
+			m.clampCursor()
+			selected := problems[m.Cursor]
+			m.navigate(screenDetail)
+			m.Detail = &selected
+			m.DetailErr = nil
+			m.DetailLoading = true
+			return true, m.fetchProblem(selected.ID)
+		}
+		return true, nil
+	case "esc", "r":
 		m.Loading = true
 		m.Err = nil
 		return true, m.fetchProblems
@@ -172,11 +246,27 @@ func (m *Model) cycleSort() {
 	}
 }
 
+func (m *Model) clampCursor() {
+	maxCursor := len(visibleProblems(m)) - 1
+	if maxCursor < 0 {
+		m.Cursor = 0
+		return
+	}
+	if m.Cursor > maxCursor {
+		m.Cursor = maxCursor
+	}
+	if m.Cursor < 0 {
+		m.Cursor = 0
+	}
+}
+
 func (m *Model) View() string {
 	content := ""
 	switch m.Screen {
 	case screenNewTask:
 		content = m.newTask.View()
+	case screenDetail:
+		content = detailView(m)
 	default:
 		content = dashboardView(m, contentWidth(m.Width))
 	}
