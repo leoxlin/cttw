@@ -80,7 +80,13 @@ func TestClient_InitializeAndPrompt(t *testing.T) {
 		// Reply to prompt with stop_reason end_turn.
 		line, _ = agentIn.Recv(ctx)
 		_ = json.Unmarshal(line, &env)
-		assert.Equal(t, "prompt", env.Method)
+		assert.Equal(t, "session/prompt", env.Method)
+		update, _ := json.Marshal(Envelope{
+			JSONRPC: "2.0",
+			Method:  "session/update",
+			Params:  json.RawMessage(`{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}`),
+		})
+		_ = agentIn.Send(ctx, update)
 		res, _ = json.Marshal(Envelope{
 			JSONRPC: "2.0",
 			ID:      env.ID,
@@ -102,6 +108,7 @@ func TestClient_InitializeAndPrompt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StopReasonEndTurn, promptRes.StopReason)
+	assert.Equal(t, "done", promptRes.Content)
 
 	_ = client.Close()
 	_ = agentIn.Close()
