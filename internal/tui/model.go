@@ -10,13 +10,17 @@ type problemsMsg struct {
 	err      error
 }
 
-type switchToDashboardMsg struct{}
+type switchToDashboardMsg struct {
+	notice string
+}
 
 type Model struct {
 	Screen   string // dashboard | newtask
 	Socket   string
 	Problems []api.ProblemResponse
+	Cursor   int
 	Err      error
+	Notice   string
 	newTask  newTaskModel
 }
 
@@ -41,11 +45,39 @@ func (m *Model) fetchProblems() tea.Msg {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.Screen == "newtask" {
+			if msg.String() == "q" || msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			updated, cmd := m.newTask.Update(msg)
+			m.newTask = updated.(newTaskModel)
+			return m, cmd
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "n":
+			m.Notice = ""
+			m.newTask = newNewTask(m.Socket)
 			m.Screen = "newtask"
+			return m, nil
+		case "e":
+			if len(m.Problems) > 0 {
+				m.Notice = ""
+				m.newTask = newEditTask(m.Socket, m.Problems[m.Cursor])
+				m.Screen = "newtask"
+			}
+			return m, nil
+		case "j", "down":
+			if m.Cursor < len(m.Problems)-1 {
+				m.Cursor++
+			}
+			return m, nil
+		case "k", "up":
+			if m.Cursor > 0 {
+				m.Cursor--
+			}
+			return m, nil
 		case "esc":
 			m.Screen = "dashboard"
 			return m, m.fetchProblems
@@ -53,8 +85,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case problemsMsg:
 		m.Problems = msg.problems
 		m.Err = msg.err
+		if m.Cursor >= len(m.Problems) {
+			m.Cursor = len(m.Problems) - 1
+		}
+		if m.Cursor < 0 {
+			m.Cursor = 0
+		}
 	case switchToDashboardMsg:
 		m.Screen = "dashboard"
+		m.Notice = msg.notice
 		return m, m.fetchProblems
 	}
 	if m.Screen == "newtask" {

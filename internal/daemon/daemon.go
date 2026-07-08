@@ -127,6 +127,7 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("POST /api/v1/problems", s.handleCreateProblem)
 	mux.HandleFunc("GET /api/v1/problems", s.handleListProblems)
 	mux.HandleFunc("GET /api/v1/problems/{id}", s.handleGetProblem)
+	mux.HandleFunc("PATCH /api/v1/problems/{id}", s.handleUpdateProblem)
 	mux.HandleFunc("GET /api/v1/status", s.handleStatus)
 	mux.HandleFunc("POST /api/v1/shutdown", s.handleShutdown)
 
@@ -239,6 +240,38 @@ func (s *Server) handleGetProblem(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(problemToResponse(problem, tasks))
+}
+
+func (s *Server) handleUpdateProblem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	description := strings.TrimSpace(req.Description)
+	if description == "" {
+		http.Error(w, "description is required", http.StatusBadRequest)
+		return
+	}
+	problem, err := s.Store.GetProblem(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	problem.Description = description
+	if err := s.Store.UpdateProblem(r.Context(), problem); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(problemToResponse(problem, nil))
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

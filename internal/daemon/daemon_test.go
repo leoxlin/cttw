@@ -323,6 +323,50 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	assert.NotZero(t, got.Tasks[0].UpdatedAt)
 }
 
+func TestServer_UpdateProblem(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	repoDir := initDaemonGitRepo(t)
+	r, err := s.CreateRepo(ctx, "llin", "cttw", repoDir, "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	gh := &mockGH{issues: make(map[string]int)}
+	regRoot := filepath.Join(t.TempDir(), "repos")
+
+	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
+	srv := &Server{
+		Store:       s,
+		Coordinator: coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute),
+		Worker:      worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute),
+		Socket:      "unix://" + sockFile,
+		shutdown:    make(chan struct{}),
+	}
+
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(srv.Shutdown)
+	waitForSocket(t, sockFile)
+
+	body, _ := json.Marshal(map[string]string{"description": "updated API"})
+	resp, err := unixPatch(sockFile, "/api/v1/problems/"+problem.ID, body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var got problemResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	assert.Equal(t, "updated API", got.Description)
+	assert.Equal(t, "pending", got.Status)
+
+	stored, err := s.GetProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "updated API", stored.Description)
+}
+
 func waitForSocket(t *testing.T, path string) {
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(path)
@@ -356,4 +400,19 @@ func unixGet(sock, path string) (*http.Response, error) {
 		Timeout: 5 * time.Second,
 	}
 	return c.Get("http://unix" + path)
+}
+
+func unixPatch(sock, path string, body []byte) (*http.Response, error) {
+	c := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+	req, _ := http.NewRequest(http.MethodPatch, "http://unix"+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return c.Do(req)
 }

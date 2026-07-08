@@ -51,6 +51,22 @@ func (c *Client) CreateProblem(owner, repo, description string) (*ProblemRespons
 	return &pr, nil
 }
 
+func (c *Client) UpdateProblem(id, description string) (*ProblemResponse, error) {
+	body, err := json.Marshal(UpdateProblemRequest{Description: description})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	resp, err := c.patch("/api/v1/problems/"+url.PathEscape(id), body)
+	if err != nil {
+		return nil, err
+	}
+	var pr ProblemResponse
+	if err := json.Unmarshal(resp, &pr); err != nil {
+		return nil, err
+	}
+	return &pr, nil
+}
+
 func (c *Client) ListProblems() ([]ProblemResponse, error) {
 	resp, err := c.get("/api/v1/problems")
 	if err != nil {
@@ -113,7 +129,15 @@ func (c *Client) get(path string) ([]byte, error) {
 }
 
 func (c *Client) post(path string, body []byte) ([]byte, error) {
-	req, err := http.NewRequest("POST", c.url(path), bytes.NewReader(body))
+	return c.send("POST", path, body)
+}
+
+func (c *Client) patch(path string, body []byte) ([]byte, error) {
+	return c.send("PATCH", path, body)
+}
+
+func (c *Client) send(method, path string, body []byte) ([]byte, error) {
+	req, err := http.NewRequest(method, c.url(path), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
