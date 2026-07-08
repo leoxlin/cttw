@@ -73,7 +73,7 @@ func TestClient_InitializeAndPrompt(t *testing.T) {
 		res, _ := json.Marshal(Envelope{
 			JSONRPC: "2.0",
 			ID:      env.ID,
-			Result: json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"fake","version":"1"},"authMethods":[]}`),
+			Result:  json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"fake","version":"1"},"authMethods":[]}`),
 		})
 		_ = agentIn.Send(ctx, res)
 
@@ -321,10 +321,10 @@ func TestClient_ResponseDuringCloseDoesNotPanic(t *testing.T) {
 // eofTransport returns EOF immediately so the client read loop exits cleanly.
 type eofTransport struct{}
 
-func (eofTransport) Start(ctx context.Context) error { return nil }
+func (eofTransport) Start(ctx context.Context) error             { return nil }
 func (eofTransport) Send(ctx context.Context, data []byte) error { return nil }
-func (eofTransport) Recv(ctx context.Context) ([]byte, error) { return nil, io.EOF }
-func (eofTransport) Close() error { return nil }
+func (eofTransport) Recv(ctx context.Context) ([]byte, error)    { return nil, io.EOF }
+func (eofTransport) Close() error                                { return nil }
 
 func TestClient_ConcurrentRouteResponseAndClose(t *testing.T) {
 	for i := 0; i < 200; i++ {

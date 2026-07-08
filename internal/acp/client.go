@@ -32,7 +32,7 @@ type Client struct {
 	closed  bool
 	closeCh chan struct{}
 	// errCh is a best-effort sink for malformed messages and unmatched responses.
-	errCh   chan error
+	errCh chan error
 }
 
 func NewClient(transport Transport) *Client {
