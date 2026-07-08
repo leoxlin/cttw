@@ -64,13 +64,13 @@ func TestExtractOutermost(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "json inside string literal before real array",
+			name:  "json inside string literal before real array",
 			input: `"[{"title":"fake"}]" [{"title":"real"}]`,
 			open:  '[',
 			want:  `[{"title":"real"}]`,
 		},
 		{
-			name: "json inside string literal before real object",
+			name:  "json inside string literal before real object",
 			input: `"{"status":"fake"}" {"status":"real"}`,
 			open:  '{',
 			want:  `{"status":"real"}`,
