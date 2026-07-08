@@ -103,6 +103,20 @@ func TestNewTask_ResizesForNarrowWidth(t *testing.T) {
 	assert.Equal(t, 5, m.description.Height())
 }
 
+func TestNewTask_EnterAdvancesCreateFormFocus(t *testing.T) {
+	m := newNewTask("unix:///nonexistent")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := updated.(newTaskModel)
+	require.Nil(t, cmd)
+	assert.Equal(t, 1, nm.focus)
+
+	updated, cmd = nm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm = updated.(newTaskModel)
+	require.Nil(t, cmd)
+	assert.Equal(t, 2, nm.focus)
+}
+
 func TestNewTask_EditSubmitValidationError(t *testing.T) {
 	m := newEditTask("unix:///nonexistent", api.ProblemResponse{ID: "p1", Description: "old"})
 	m.description.SetValue(" ")

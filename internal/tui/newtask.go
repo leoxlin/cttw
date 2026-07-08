@@ -84,6 +84,11 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return n, func() tea.Msg { return switchToDashboardMsg{} }
 		case "tab", "shift+tab", "up", "down":
 			n.moveFocus(msg.String())
+		case "enter":
+			if n.mode == formCreate && n.focus < 2 {
+				n.moveFocus("down")
+				return n, nil
+			}
 		case "ctrl+d":
 			value, err := n.validate()
 			if err != nil {
