@@ -4,31 +4,40 @@ import (
 	"fmt"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/llin/cttw/internal/api"
 	"github.com/llin/cttw/internal/strutil"
 )
 
-var titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-
 func dashboardView(m *Model) string {
-	s := titleStyle.Render("cttw — Claudivicus Take The Wheel") + "\n\n"
+	s := headerStyle.Render("cttw — Claudivicus Take The Wheel") + "\n\n"
 	if m.Err != nil {
-		s += fmt.Sprintf("Error: %v\n\n", m.Err)
+		s += errorStyle.Render(fmt.Sprintf("Error: %v", m.Err)) + "\n\n"
 	}
 	if len(m.Problems) == 0 {
-		s += "No problems yet.\n\n"
+		s += mutedStyle.Render("No problems yet.") + "\n\n"
 	} else {
-		s += "Problems:\n"
+		s += headerStyle.Render("Problems") + "\n"
 		for _, p := range m.Problems {
-			line := fmt.Sprintf("  %s  %-12s  %s", strutil.ShortID(p.ID), p.Status, p.Description)
-			s += truncate(line, 78) + "\n"
+			s += problemRow(p) + "\n"
 		}
 		s += "\n"
 	}
-	s += "Keys: [n] new problem  [q] quit  [esc] refresh\n"
+	s += mutedStyle.Render("Keys: [n] new problem  [q] quit  [esc] refresh") + "\n"
 	return s
 }
 
+func problemRow(p api.ProblemResponse) string {
+	id := mutedStyle.Render(strutil.ShortID(p.ID))
+	status := problemStatusLabel(p.Status)
+	prefix := fmt.Sprintf("  %s  %s  ", id, status)
+	description := truncate(p.Description, 78-lipgloss.Width(prefix))
+	return renderRow(prefix+description, false)
+}
+
 func truncate(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if len(s) <= n {
 		return s
 	}
