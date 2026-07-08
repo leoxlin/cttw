@@ -65,15 +65,16 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (n newTaskModel) View() string {
 	if n.done {
-		return "Problem created.\n\n[esc] back"
+		return "Problem created.\n\nKeys: [esc] back  [ctrl+c] quit"
 	}
 	if n.sent {
-		return "Submitting...\n\n[esc] back"
+		return "Submitting...\n\nKeys: [esc] back  [ctrl+c] quit"
 	}
-	view := "New Problem (ctrl+d to submit, esc to cancel)\n\n" + n.textarea.View()
+	view := "New Problem\n\n" + n.textarea.View()
 	if n.err != nil {
 		view += "\n\nError: " + n.err.Error()
 	}
+	view += "\n\nKeys: [ctrl+d] submit  [esc] back  [ctrl+c] quit"
 	return view
 }
 
