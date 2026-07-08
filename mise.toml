@@ -1,5 +1,7 @@
 [tools]
 go = "1.25.0"
+node = "22"
+"npm:@agentclientprotocol/codex-acp" = "latest"
 
 [tasks.build]
 description = "Build cttw binary into bin/"

@@ -124,9 +124,15 @@ func (s *Server) workerLoop(ctx context.Context) {
 
 func (s *Server) Serve() error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/projects", s.handleCreateProject)
+	mux.HandleFunc("GET /api/v1/projects", s.handleListProjects)
+	mux.HandleFunc("GET /api/v1/projects/{id}", s.handleGetProject)
+	mux.HandleFunc("PUT /api/v1/projects/{id}", s.handleUpdateProject)
+	mux.HandleFunc("DELETE /api/v1/projects/{id}", s.handleDeleteProject)
 	mux.HandleFunc("POST /api/v1/problems", s.handleCreateProblem)
 	mux.HandleFunc("GET /api/v1/problems", s.handleListProblems)
 	mux.HandleFunc("GET /api/v1/problems/{id}", s.handleGetProblem)
+	mux.HandleFunc("PATCH /api/v1/problems/{id}", s.handleUpdateProblem)
 	mux.HandleFunc("GET /api/v1/status", s.handleStatus)
 	mux.HandleFunc("POST /api/v1/shutdown", s.handleShutdown)
 
@@ -178,6 +184,124 @@ func (s *Server) listen() (net.Listener, string, error) {
 	return l, l.Addr().String(), nil
 }
 
+func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Owner         string `json:"owner"`
+		Name          string `json:"name"`
+		LocalDir      string `json:"local_dir"`
+		DefaultBranch string `json:"default_branch"`
+		CloneURL      string `json:"clone_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateProjectRequest(req.Owner, req.Name, req.LocalDir); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.DefaultBranch) == "" {
+		req.DefaultBranch = "main"
+	}
+	project, err := s.Store.CreateRepo(r.Context(), req.Owner, req.Name, req.LocalDir, req.DefaultBranch, req.CloneURL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(projectToResponse(project))
+}
+
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.Store.ListRepos(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := make([]projectResponse, 0, len(projects))
+	for i := range projects {
+		resp = append(resp, projectToResponse(&projects[i]))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
+	project, err := s.Store.GetRepo(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(projectToResponse(project))
+}
+
+func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
+	project, err := s.Store.GetRepo(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var req struct {
+		Owner         string `json:"owner"`
+		Name          string `json:"name"`
+		LocalDir      string `json:"local_dir"`
+		DefaultBranch string `json:"default_branch"`
+		CloneURL      string `json:"clone_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateProjectRequest(req.Owner, req.Name, req.LocalDir); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.DefaultBranch) == "" {
+		req.DefaultBranch = "main"
+	}
+	project.Owner = req.Owner
+	project.Name = req.Name
+	project.LocalDir = req.LocalDir
+	project.DefaultBranch = req.DefaultBranch
+	project.CloneURL = req.CloneURL
+	if err := s.Store.UpdateRepo(r.Context(), project); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(projectToResponse(project))
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	if err := s.Store.DeleteRepo(r.Context(), r.PathValue("id")); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func validateProjectRequest(owner, name, localDir string) error {
+	if strings.TrimSpace(owner) == "" || strings.TrimSpace(name) == "" || strings.TrimSpace(localDir) == "" {
+		return errors.New("owner, name, and local_dir are required")
+	}
+	return nil
+}
+
 func (s *Server) handleCreateProblem(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Owner       string `json:"owner"`
@@ -202,9 +326,14 @@ func (s *Server) handleCreateProblem(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	repo, err := s.Store.GetRepo(r.Context(), problem.RepoID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(problemToResponse(problem, nil))
+	json.NewEncoder(w).Encode(problemToResponse(problem, nil, repo))
 }
 
 func (s *Server) handleListProblems(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +344,17 @@ func (s *Server) handleListProblems(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := make([]problemResponse, 0, len(problems))
 	for i := range problems {
-		resp = append(resp, problemToResponse(&problems[i], nil))
+		repo, err := s.Store.GetRepo(r.Context(), problems[i].RepoID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		tasks, err := s.Store.ListTasksByProblem(r.Context(), problems[i].ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp = append(resp, problemToResponse(&problems[i], tasks, repo))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -237,8 +376,50 @@ func (s *Server) handleGetProblem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	repo, err := s.Store.GetRepo(r.Context(), problem.RepoID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(problemToResponse(problem, tasks))
+	json.NewEncoder(w).Encode(problemToResponse(problem, tasks, repo))
+}
+
+func (s *Server) handleUpdateProblem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	description := strings.TrimSpace(req.Description)
+	if description == "" {
+		http.Error(w, "description is required", http.StatusBadRequest)
+		return
+	}
+	problem, err := s.Store.GetProblem(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	problem.Description = description
+	if err := s.Store.UpdateProblem(r.Context(), problem); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	repo, err := s.Store.GetRepo(r.Context(), problem.RepoID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(problemToResponse(problem, nil, repo))
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -251,11 +432,24 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type projectResponse struct {
+	ID            string    `json:"id"`
+	Owner         string    `json:"owner"`
+	Name          string    `json:"name"`
+	LocalDir      string    `json:"local_dir"`
+	DefaultBranch string    `json:"default_branch"`
+	CloneURL      string    `json:"clone_url,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 type problemResponse struct {
 	ID          string         `json:"id"`
 	Description string         `json:"description"`
 	Status      string         `json:"status"`
 	RepoID      string         `json:"repo_id"`
+	RepoOwner   string         `json:"repo_owner,omitempty"`
+	RepoName    string         `json:"repo_name,omitempty"`
 	IssueNumber int            `json:"issue_number"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
@@ -273,7 +467,20 @@ type taskResponse struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
+func projectToResponse(r *store.Repo) projectResponse {
+	return projectResponse{
+		ID:            r.ID,
+		Owner:         r.Owner,
+		Name:          r.Name,
+		LocalDir:      r.LocalDir,
+		DefaultBranch: r.DefaultBranch,
+		CloneURL:      r.CloneURL,
+		CreatedAt:     r.CreatedAt,
+		UpdatedAt:     r.UpdatedAt,
+	}
+}
+
+func problemToResponse(p *store.Problem, tasks []store.Task, repo *store.Repo) problemResponse {
 	resp := problemResponse{
 		ID:          p.ID,
 		Description: p.Description,
@@ -282,6 +489,10 @@ func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
 		IssueNumber: p.ParentIssueNumber,
 		CreatedAt:   p.CreatedAt,
 		UpdatedAt:   p.UpdatedAt,
+	}
+	if repo != nil {
+		resp.RepoOwner = repo.Owner
+		resp.RepoName = repo.Name
 	}
 	for _, t := range tasks {
 		resp.Tasks = append(resp.Tasks, taskResponse{
