@@ -51,7 +51,12 @@ func (l *CodexLauncher) Launch(ctx context.Context, spec LaunchSpec) (Agent, err
 		return nil, fmt.Errorf("backend %q missing command", spec.Backend)
 	}
 
-	cmd := exec.CommandContext(ctx, backend.Command)
+	command, err := resolveLocalCommand(backend.Command)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.CommandContext(ctx, command)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdin pipe: %w", err)
@@ -89,6 +94,23 @@ func (l *CodexLauncher) Launch(ctx context.Context, spec LaunchSpec) (Agent, err
 		spec:        spec,
 		processDone: processDone,
 	}, nil
+}
+
+func resolveLocalCommand(command string) (string, error) {
+	if strings.ContainsRune(command, os.PathSeparator) {
+		return command, nil
+	}
+	if path, err := exec.LookPath(command); err == nil {
+		return path, nil
+	}
+	out, err := exec.Command("mise", "which", command).Output()
+	if err == nil {
+		path := strings.TrimSpace(string(out))
+		if path != "" {
+			return path, nil
+		}
+	}
+	return command, nil
 }
 
 type codexAgent struct {
