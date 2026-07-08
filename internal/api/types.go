@@ -2,6 +2,33 @@ package api
 
 import "time"
 
+type CreateProjectRequest struct {
+	Owner         string `json:"owner"`
+	Name          string `json:"name"`
+	LocalDir      string `json:"local_dir"`
+	DefaultBranch string `json:"default_branch"`
+	CloneURL      string `json:"clone_url,omitempty"`
+}
+
+type UpdateProjectRequest struct {
+	Owner         string `json:"owner"`
+	Name          string `json:"name"`
+	LocalDir      string `json:"local_dir"`
+	DefaultBranch string `json:"default_branch"`
+	CloneURL      string `json:"clone_url,omitempty"`
+}
+
+type ProjectResponse struct {
+	ID            string    `json:"id"`
+	Owner         string    `json:"owner"`
+	Name          string    `json:"name"`
+	LocalDir      string    `json:"local_dir"`
+	DefaultBranch string    `json:"default_branch"`
+	CloneURL      string    `json:"clone_url,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 type CreateProblemRequest struct {
 	Owner       string `json:"owner"`
 	Repo        string `json:"repo"`

@@ -18,6 +18,37 @@ func TestCreateProblemRequest_JSON(t *testing.T) {
 	assert.Contains(t, string(b), `"description":"build API"`)
 }
 
+func TestProjectRequestResponse_JSON(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	req := CreateProjectRequest{
+		Owner:         "llin",
+		Name:          "cttw",
+		LocalDir:      "/tmp/cttw",
+		DefaultBranch: "main",
+		CloneURL:      "https://github.com/llin/cttw.git",
+	}
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"owner":"llin"`)
+	assert.Contains(t, string(b), `"name":"cttw"`)
+	assert.Contains(t, string(b), `"local_dir":"/tmp/cttw"`)
+	assert.Contains(t, string(b), `"default_branch":"main"`)
+
+	resp := ProjectResponse{
+		ID:            "r1",
+		Owner:         "llin",
+		Name:          "cttw",
+		LocalDir:      "/tmp/cttw",
+		DefaultBranch: "main",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	b, err = json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"id":"r1"`)
+	assert.Contains(t, string(b), `"created_at":"2026-07-05T12:00:00Z"`)
+}
+
 func TestProblemResponse_JSON(t *testing.T) {
 	resp := ProblemResponse{
 		ID:          "p1",

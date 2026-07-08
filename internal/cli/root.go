@@ -14,7 +14,7 @@ func Run() error {
 		Use:   "cttw",
 		Short: "Claudivicus Take The Wheel",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
+			cfg, err := config.LoadClient(os.Getenv("CTTW_CONFIG"), nil)
 			if err != nil {
 				return err
 			}

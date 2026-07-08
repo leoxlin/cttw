@@ -42,6 +42,7 @@ func newNewTask(socket string) newTaskModel {
 
 	desc := textarea.New()
 	desc.Placeholder = "Describe the problem..."
+	desc.ShowLineNumbers = false
 
 	return newTaskModel{
 		mode:        formCreate,
@@ -57,6 +58,7 @@ func newEditTask(socket string, problem api.ProblemResponse) newTaskModel {
 	repo := textinput.New()
 	desc := textarea.New()
 	desc.Placeholder = "Describe the problem..."
+	desc.ShowLineNumbers = false
 	desc.SetValue(problem.Description)
 	desc.Focus()
 
@@ -126,24 +128,22 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (n *newTaskModel) moveFocus(key string) {
-	maxFocus := 2
 	if n.mode == formEdit {
-		maxFocus = 2
+		n.focus = 2
+		n.applyFocus()
+		return
 	}
+
 	if key == "shift+tab" || key == "up" {
 		n.focus--
 	} else {
 		n.focus++
 	}
-	if n.mode == formCreate {
-		if n.focus < 0 {
-			n.focus = maxFocus
-		}
-		if n.focus > maxFocus {
-			n.focus = 0
-		}
-	} else {
+	if n.focus < 0 {
 		n.focus = 2
+	}
+	if n.focus > 2 {
+		n.focus = 0
 	}
 	n.applyFocus()
 }
@@ -191,29 +191,39 @@ func (n newTaskModel) validate() (problemFormValue, error) {
 
 func (n newTaskModel) View() string {
 	if n.done {
+		title := "Problem created"
 		if n.mode == formEdit {
-			return "Problem updated.\n\n[esc] back"
+			title = "Problem updated"
 		}
-		return "Problem created.\n\n[esc] back"
+		return sectionTitleStyle.Render(title) + "\n\n" + helpStyle.Render("[esc] back")
 	}
 	if n.sent {
-		return "Submitting...\n\n[esc] back"
+		return sectionTitleStyle.Render("Submitting...") + "\n\n" + helpStyle.Render("[esc] back")
 	}
 
 	title := "New Problem"
 	if n.mode == formEdit {
 		title = "Edit Problem"
 	}
-	view := title + " (ctrl+d to submit, esc to cancel)\n\n"
+	view := sectionTitleStyle.Render(title) + "\n" +
+		helpStyle.Render("ctrl+d to submit, esc to cancel") + "\n\n"
 	if n.mode == formCreate {
 		view += "Owner\n" + n.ownerInput.View() + "\n\n"
 		view += "Repo\n" + n.repoInput.View() + "\n\n"
 	}
 	view += "Description\n" + n.description.View()
 	if n.err != nil {
-		view += "\n\nError: " + n.err.Error()
+		view += "\n\n" + errorStyle.Render("Error: "+n.err.Error())
 	}
 	return view
+}
+
+func (n *newTaskModel) SetSize(width, height int) {
+	width = maxInt(width, 24)
+	n.ownerInput.Width = width
+	n.repoInput.Width = width
+	n.description.SetWidth(width)
+	n.description.SetHeight(maxInt(height-8, 5))
 }
 
 type problemFormValue struct {
