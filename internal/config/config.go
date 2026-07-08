@@ -60,6 +60,17 @@ type BackendConfig struct {
 }
 
 func Load(path string, env map[string]string) (*Config, error) {
+	return load(path, env, true)
+}
+
+// LoadClient loads only the settings needed by commands that talk to an
+// already-running daemon. It intentionally skips daemon-only validation such as
+// github_token and agent backend checks.
+func LoadClient(path string, env map[string]string) (*Config, error) {
+	return load(path, env, false)
+}
+
+func load(path string, env map[string]string, validateDaemon bool) (*Config, error) {
 	if env == nil {
 		env = envMap()
 	}
@@ -83,7 +94,7 @@ func Load(path string, env map[string]string) (*Config, error) {
 	if v := env["GITHUB_TOKEN"]; v != "" {
 		cfg.GitHubToken = v
 	}
-	if cfg.GitHubToken == "" {
+	if validateDaemon && cfg.GitHubToken == "" {
 		if tok, err := ghAuthToken(); err == nil && tok != "" {
 			cfg.GitHubToken = tok
 		}
@@ -100,8 +111,12 @@ func Load(path string, env map[string]string) (*Config, error) {
 		}
 		cfg.Repos = repos
 	}
-	if err := validate(cfg); err != nil {
-		return nil, err
+	if validateDaemon {
+		if err := validate(cfg); err != nil {
+			return nil, err
+		}
+	} else {
+		defaultRepoBranches(cfg.Repos)
 	}
 	return cfg, nil
 }
@@ -110,13 +125,8 @@ func validate(cfg *Config) error {
 	if cfg.GitHubToken == "" {
 		return fmt.Errorf("github_token is required")
 	}
-	for i, r := range cfg.Repos {
-		if r.Owner == "" || r.Name == "" {
-			return fmt.Errorf("repo %d must have owner and name", i)
-		}
-		if r.DefaultBranch == "" {
-			cfg.Repos[i].DefaultBranch = "main"
-		}
+	if err := validateRepos(cfg.Repos); err != nil {
+		return err
 	}
 	if cfg.Agent.DefaultBackend == "" {
 		return fmt.Errorf("agent.default_backend is required")
@@ -134,6 +144,26 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("backend %q has unsupported type %q", cfg.Agent.DefaultBackend, backend.Type)
 	}
 	return nil
+}
+
+func validateRepos(repos []RepoConfig) error {
+	for i, r := range repos {
+		if r.Owner == "" || r.Name == "" {
+			return fmt.Errorf("repo %d must have owner and name", i)
+		}
+		if r.DefaultBranch == "" {
+			repos[i].DefaultBranch = "main"
+		}
+	}
+	return nil
+}
+
+func defaultRepoBranches(repos []RepoConfig) {
+	for i := range repos {
+		if repos[i].DefaultBranch == "" {
+			repos[i].DefaultBranch = "main"
+		}
+	}
 }
 
 func parseRepoEnv(v string) ([]RepoConfig, error) {

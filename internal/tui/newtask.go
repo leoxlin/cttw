@@ -10,8 +10,16 @@ import (
 	"github.com/llin/cttw/internal/api"
 )
 
+const (
+	formCreate = "create"
+	formEdit   = "edit"
+)
+
 type newTaskModel struct {
-	repo        textinput.Model
+	mode        string
+	problem     api.ProblemResponse
+	ownerInput  textinput.Model
+	repoInput   textinput.Model
 	description textarea.Model
 	focus       int
 	socket      string
@@ -25,22 +33,47 @@ type submitProblemMsg struct {
 }
 
 func newNewTask(socket string) newTaskModel {
+	owner := textinput.New()
+	owner.Placeholder = "owner"
+	owner.Focus()
+
 	repo := textinput.New()
-	repo.Placeholder = "owner/repo"
-	repo.CharLimit = 160
-	repo.Width = 40
+	repo.Placeholder = "repo"
 
-	description := textarea.New()
-	description.Placeholder = "Describe the problem..."
+	desc := textarea.New()
+	desc.Placeholder = "Describe the problem..."
+	desc.ShowLineNumbers = false
 
-	n := newTaskModel{repo: repo, description: description, socket: socket}
-	n.setFocus(0)
-	return n
+	return newTaskModel{
+		mode:        formCreate,
+		ownerInput:  owner,
+		repoInput:   repo,
+		description: desc,
+		socket:      socket,
+	}
 }
 
-func (n newTaskModel) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, textarea.Blink)
+func newEditTask(socket string, problem api.ProblemResponse) newTaskModel {
+	owner := textinput.New()
+	repo := textinput.New()
+	desc := textarea.New()
+	desc.Placeholder = "Describe the problem..."
+	desc.ShowLineNumbers = false
+	desc.SetValue(problem.Description)
+	desc.Focus()
+
+	return newTaskModel{
+		mode:        formEdit,
+		problem:     problem,
+		ownerInput:  owner,
+		repoInput:   repo,
+		description: desc,
+		socket:      socket,
+		focus:       2,
+	}
 }
+
+func (n newTaskModel) Init() tea.Cmd { return textarea.Blink }
 
 func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -50,28 +83,24 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			return n, func() tea.Msg { return switchToDashboardMsg{} }
 		case "tab", "shift+tab", "up", "down":
-			if msg.String() == "shift+tab" || msg.String() == "up" {
-				n.setFocus(0)
-			} else {
-				n.setFocus(1)
-			}
-			return n, nil
+			n.moveFocus(msg.String())
 		case "enter":
-			if n.focus == 0 {
-				n.setFocus(1)
+			if n.mode == formCreate && n.focus < 2 {
+				n.moveFocus("down")
 				return n, nil
 			}
 		case "ctrl+d":
-			owner, repo, description, err := n.validate()
+			value, err := n.validate()
 			if err != nil {
 				n.err = err
+				n.sent = false
 				n.done = false
 				return n, nil
 			}
 			n.sent = true
 			n.err = nil
 			n.done = false
-			return n, n.submit(owner, repo, description)
+			return n, n.submit(value)
 		}
 	case submitProblemMsg:
 		n.sent = false
@@ -82,70 +111,141 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		n.err = nil
 		n.done = true
-		return n, func() tea.Msg { return switchToDashboardMsg{} }
+		notice := "Problem created."
+		if n.mode == formEdit {
+			notice = "Problem updated."
+		}
+		return n, func() tea.Msg { return switchToDashboardMsg{notice: notice} }
 	}
-	if n.sent {
-		return n, nil
-	}
-	if n.focus == 0 {
-		m, cmd := n.repo.Update(msg)
-		n.repo = m
+
+	var cmd tea.Cmd
+	if n.mode == formCreate && n.focus == 0 {
+		n.ownerInput, cmd = n.ownerInput.Update(msg)
 		cmds = append(cmds, cmd)
-		return n, tea.Batch(cmds...)
+	} else if n.mode == formCreate && n.focus == 1 {
+		n.repoInput, cmd = n.repoInput.Update(msg)
+		cmds = append(cmds, cmd)
+	} else {
+		n.description, cmd = n.description.Update(msg)
+		cmds = append(cmds, cmd)
 	}
-	m, cmd := n.description.Update(msg)
-	n.description = m
-	cmds = append(cmds, cmd)
 	return n, tea.Batch(cmds...)
+}
+
+func (n *newTaskModel) moveFocus(key string) {
+	if n.mode == formEdit {
+		n.focus = 2
+		n.applyFocus()
+		return
+	}
+
+	if key == "shift+tab" || key == "up" {
+		n.focus--
+	} else {
+		n.focus++
+	}
+	if n.focus < 0 {
+		n.focus = 2
+	}
+	if n.focus > 2 {
+		n.focus = 0
+	}
+	n.applyFocus()
+}
+
+func (n *newTaskModel) applyFocus() {
+	n.ownerInput.Blur()
+	n.repoInput.Blur()
+	n.description.Blur()
+	if n.mode == formCreate && n.focus == 0 {
+		n.ownerInput.Focus()
+	} else if n.mode == formCreate && n.focus == 1 {
+		n.repoInput.Focus()
+	} else {
+		n.description.Focus()
+	}
+}
+
+func (n newTaskModel) validate() (problemFormValue, error) {
+	value := problemFormValue{
+		owner:       strings.TrimSpace(n.ownerInput.Value()),
+		repo:        strings.TrimSpace(n.repoInput.Value()),
+		description: strings.TrimSpace(n.description.Value()),
+	}
+	if n.mode == formEdit {
+		value.id = n.problem.ID
+		if value.description == "" {
+			return value, fmt.Errorf("description is required")
+		}
+		return value, nil
+	}
+	if value.owner == "" {
+		return value, fmt.Errorf("owner is required")
+	}
+	if value.repo == "" {
+		return value, fmt.Errorf("repo is required")
+	}
+	if strings.Contains(value.owner, "/") || strings.Contains(value.repo, "/") {
+		return value, fmt.Errorf("repo must be split into owner and name")
+	}
+	if value.description == "" {
+		return value, fmt.Errorf("description is required")
+	}
+	return value, nil
 }
 
 func (n newTaskModel) View() string {
 	if n.done {
-		return "Problem created.\n\n[esc] back"
+		title := "Problem created"
+		if n.mode == formEdit {
+			title = "Problem updated"
+		}
+		return sectionTitleStyle.Render(title) + "\n\n" + helpStyle.Render("[esc] back")
 	}
 	if n.sent {
-		return "Submitting...\n\n[esc] back"
+		return sectionTitleStyle.Render("Submitting...") + "\n\n" + helpStyle.Render("[esc] back")
 	}
-	view := "New Problem (ctrl+d to submit, tab to switch, esc to cancel)\n\n"
-	view += "Repo owner/name\n" + n.repo.View()
-	view += "\n\nDescription\n" + n.description.View()
+
+	title := "New Problem"
+	if n.mode == formEdit {
+		title = "Edit Problem"
+	}
+	view := sectionTitleStyle.Render(title) + "\n" +
+		helpStyle.Render("ctrl+d to submit, esc to cancel") + "\n\n"
+	if n.mode == formCreate {
+		view += "Owner\n" + n.ownerInput.View() + "\n\n"
+		view += "Repo\n" + n.repoInput.View() + "\n\n"
+	}
+	view += "Description\n" + n.description.View()
 	if n.err != nil {
-		view += "\n\nError: " + n.err.Error()
+		view += "\n\n" + errorStyle.Render("Error: "+n.err.Error())
 	}
 	return view
 }
 
-func (n *newTaskModel) setFocus(focus int) {
-	n.focus = focus
-	if focus == 0 {
-		n.description.Blur()
-		n.repo.Focus()
-		return
-	}
-	n.repo.Blur()
-	n.description.Focus()
+func (n *newTaskModel) SetSize(width, height int) {
+	width = maxInt(width, 24)
+	n.ownerInput.Width = width
+	n.repoInput.Width = width
+	n.description.SetWidth(width)
+	n.description.SetHeight(maxInt(height-8, 5))
 }
 
-func (n newTaskModel) validate() (owner, repo, description string, err error) {
-	repoSpec := strings.TrimSpace(n.repo.Value())
-	description = strings.TrimSpace(n.description.Value())
-	if repoSpec == "" {
-		return "", "", "", fmt.Errorf("repo is required")
-	}
-	repoParts := strings.Split(repoSpec, "/")
-	if len(repoParts) != 2 || strings.TrimSpace(repoParts[0]) == "" || strings.TrimSpace(repoParts[1]) == "" {
-		return "", "", "", fmt.Errorf("repo must be owner/name")
-	}
-	if description == "" {
-		return "", "", "", fmt.Errorf("description is required")
-	}
-	return strings.TrimSpace(repoParts[0]), strings.TrimSpace(repoParts[1]), description, nil
+type problemFormValue struct {
+	id          string
+	owner       string
+	repo        string
+	description string
 }
 
-func (n newTaskModel) submit(owner, repo, description string) tea.Cmd {
+func (n newTaskModel) submit(value problemFormValue) tea.Cmd {
 	return func() tea.Msg {
-		client := api.NewClient(n.socket)
-		_, err := client.CreateProblem(owner, repo, description)
+		client := newProblemAPIClient(n.socket)
+		if n.mode == formEdit {
+			_, err := client.UpdateProblem(value.id, value.description)
+			return submitProblemMsg{err: err}
+		}
+		_, err := client.CreateProblem(value.owner, value.repo, value.description)
 		return submitProblemMsg{err: err}
 	}
 }
