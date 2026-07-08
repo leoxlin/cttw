@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -259,6 +260,78 @@ func TestServer_CreateProblem_LazyRegistersRepo(t *testing.T) {
 	assert.Equal(t, "main", r.DefaultBranch)
 }
 
+func TestServer_ProjectCRUD(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
+	srv := &Server{
+		Store:    s,
+		Socket:   "unix://" + sockFile,
+		shutdown: make(chan struct{}),
+	}
+
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(srv.Shutdown)
+	waitForSocket(t, sockFile)
+
+	body, _ := json.Marshal(map[string]string{
+		"owner":          "llin",
+		"name":           "cttw",
+		"local_dir":      "/tmp/cttw",
+		"default_branch": "main",
+		"clone_url":      "https://github.com/llin/cttw.git",
+	})
+	resp, err := unixPost(sockFile, "/api/v1/projects", body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var created projectResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	assert.Equal(t, "llin", created.Owner)
+	assert.Equal(t, "cttw", created.Name)
+	assert.NotZero(t, created.CreatedAt)
+	assert.NotZero(t, created.UpdatedAt)
+
+	resp, err = unixGet(sockFile, "/api/v1/projects/"+created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var got projectResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	assert.Equal(t, created.ID, got.ID)
+
+	updateBody, _ := json.Marshal(map[string]string{
+		"owner":          "llin",
+		"name":           "cttw-renamed",
+		"local_dir":      "/tmp/cttw-renamed",
+		"default_branch": "trunk",
+	})
+	resp, err = unixPut(sockFile, "/api/v1/projects/"+created.ID, updateBody)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var updated projectResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&updated))
+	assert.Equal(t, "cttw-renamed", updated.Name)
+	assert.Equal(t, "trunk", updated.DefaultBranch)
+
+	resp, err = unixGet(sockFile, "/api/v1/projects")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var projects []projectResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&projects))
+	require.Len(t, projects, 1)
+	assert.Equal(t, updated.ID, projects[0].ID)
+
+	resp, err = unixDelete(sockFile, "/api/v1/projects/"+created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	resp, err = unixGet(sockFile, "/api/v1/projects/"+created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
 func TestServer_CreateAndGetProblem(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
@@ -323,6 +396,84 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	assert.NotZero(t, got.Tasks[0].UpdatedAt)
 }
 
+func TestServer_ListProblemsIncludesRepoAndTasks(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	r, err := s.CreateRepo(ctx, "llin", "cttw", t.TempDir(), "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+	problem.Status = "ready"
+	problem.ParentIssueNumber = 42
+	require.NoError(t, s.UpdateProblem(ctx, problem))
+	_, err = s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+	_, err = s.CreateTask(ctx, problem.ID, r.ID, "add tests", "cover POST")
+	require.NoError(t, err)
+
+	srv := &Server{Store: s}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/problems", nil)
+
+	srv.handleListProblems(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []problemResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	require.Len(t, got, 1)
+	assert.Equal(t, "llin", got[0].RepoOwner)
+	assert.Equal(t, "cttw", got[0].RepoName)
+	assert.Equal(t, 42, got[0].IssueNumber)
+	require.Len(t, got[0].Tasks, 2)
+}
+
+func TestServer_UpdateProblem(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	repoDir := initDaemonGitRepo(t)
+	r, err := s.CreateRepo(ctx, "llin", "cttw", repoDir, "main", "")
+	require.NoError(t, err)
+	problem, err := s.CreateProblem(ctx, "build API", r.ID)
+	require.NoError(t, err)
+
+	ml := &launcher.MockLauncher{}
+	gh := &mockGH{issues: make(map[string]int)}
+	regRoot := filepath.Join(t.TempDir(), "repos")
+
+	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
+	srv := &Server{
+		Store:       s,
+		Coordinator: coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute),
+		Worker:      worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute),
+		Socket:      "unix://" + sockFile,
+		shutdown:    make(chan struct{}),
+	}
+
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(srv.Shutdown)
+	waitForSocket(t, sockFile)
+
+	body, _ := json.Marshal(map[string]string{"description": "updated API"})
+	resp, err := unixPatch(sockFile, "/api/v1/problems/"+problem.ID, body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var got problemResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	assert.Equal(t, "updated API", got.Description)
+	assert.Equal(t, "pending", got.Status)
+
+	stored, err := s.GetProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "updated API", stored.Description)
+}
+
 func waitForSocket(t *testing.T, path string) {
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(path)
@@ -356,4 +507,48 @@ func unixGet(sock, path string) (*http.Response, error) {
 		Timeout: 5 * time.Second,
 	}
 	return c.Get("http://unix" + path)
+}
+
+func unixPatch(sock, path string, body []byte) (*http.Response, error) {
+	c := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+	req, _ := http.NewRequest(http.MethodPatch, "http://unix"+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return c.Do(req)
+}
+
+func unixPut(sock, path string, body []byte) (*http.Response, error) {
+	c := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+	req, _ := http.NewRequest(http.MethodPut, "http://unix"+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return c.Do(req)
+}
+
+func unixDelete(sock, path string) (*http.Response, error) {
+	c := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+	req, _ := http.NewRequest(http.MethodDelete, "http://unix"+path, nil)
+	return c.Do(req)
 }

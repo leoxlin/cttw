@@ -8,18 +8,10 @@ import (
 
 const statusLabelWidth = 10
 
-var (
-	headerStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-	selectedRowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#3B4252"))
-	mutedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-	errorStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#DC2626"))
-	loadingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#2563EB"))
-
-	statusLabelBaseStyle = lipgloss.NewStyle().
-				Bold(true).
-				Width(statusLabelWidth).
-				Align(lipgloss.Center)
-)
+var statusLabelBaseStyle = lipgloss.NewStyle().
+	Bold(true).
+	Width(statusLabelWidth).
+	Align(lipgloss.Center)
 
 var problemStatusStyles = map[string]lipgloss.Style{
 	"pending": statusLabelBaseStyle.Foreground(lipgloss.Color("#B45309")),
@@ -41,13 +33,6 @@ func problemStatusLabel(status string) string {
 
 func taskStatusLabel(status string) string {
 	return statusLabel(taskStatusStyles, status)
-}
-
-func renderRow(row string, selected bool) string {
-	if selected {
-		return selectedRowStyle.Render(row)
-	}
-	return row
 }
 
 func statusLabel(styles map[string]lipgloss.Style, status string) string {
