@@ -13,8 +13,11 @@ type problemsMsg struct {
 type switchToDashboardMsg struct{}
 
 const (
-	screenDashboard = "dashboard"
-	screenNewTask   = "newtask"
+	ScreenDashboard  = "dashboard"
+	ScreenNewProblem = "newtask"
+
+	screenDashboard = ScreenDashboard
+	screenNewTask   = ScreenNewProblem
 )
 
 type Model struct {
@@ -29,7 +32,7 @@ type Model struct {
 
 func New(socket string) *Model {
 	m := &Model{
-		Screen:  screenDashboard,
+		Screen:  ScreenDashboard,
 		Socket:  socket,
 		Width:   defaultShellWidth,
 		Height:  defaultShellHeight,
