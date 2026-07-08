@@ -10,12 +10,19 @@ type problemsMsg struct {
 	err      error
 }
 
+type problemMsg struct {
+	problem *api.ProblemResponse
+	err     error
+}
+
 type switchToDashboardMsg struct{}
 
 type Model struct {
-	Screen   string // dashboard | newtask
+	Screen   string // dashboard | newtask | detail
 	Socket   string
 	Problems []api.ProblemResponse
+	Cursor   int
+	Detail   *api.ProblemResponse
 	Err      error
 	newTask  newTaskModel
 }
@@ -33,9 +40,15 @@ func (m *Model) Init() tea.Cmd {
 }
 
 func (m *Model) fetchProblems() tea.Msg {
-	client := api.NewClient(m.Socket)
-	problems, err := client.ListProblems()
+	problems, err := listProblems(m.Socket)
 	return problemsMsg{problems: problems, err: err}
+}
+
+func (m *Model) fetchProblem(id string) tea.Cmd {
+	return func() tea.Msg {
+		problem, err := getProblem(m.Socket, id)
+		return problemMsg{problem: problem, err: err}
+	}
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -49,9 +62,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.Screen = "dashboard"
 			return m, m.fetchProblems
+		case "up", "k":
+			if m.Screen == "dashboard" && m.Cursor > 0 {
+				m.Cursor--
+			}
+		case "down", "j":
+			if m.Screen == "dashboard" && m.Cursor < len(m.Problems)-1 {
+				m.Cursor++
+			}
+		case "enter":
+			if m.Screen == "dashboard" && len(m.Problems) > 0 {
+				m.Screen = "detail"
+				m.Detail = nil
+				m.Err = nil
+				return m, m.fetchProblem(m.Problems[m.Cursor].ID)
+			}
 		}
 	case problemsMsg:
 		m.Problems = msg.problems
+		m.Err = msg.err
+		if m.Cursor >= len(m.Problems) {
+			m.Cursor = len(m.Problems) - 1
+		}
+		if m.Cursor < 0 {
+			m.Cursor = 0
+		}
+	case problemMsg:
+		m.Detail = msg.problem
 		m.Err = msg.err
 	case switchToDashboardMsg:
 		m.Screen = "dashboard"
@@ -69,6 +106,8 @@ func (m *Model) View() string {
 	switch m.Screen {
 	case "newtask":
 		return m.newTask.View()
+	case "detail":
+		return detailView(m)
 	default:
 		return dashboardView(m)
 	}
