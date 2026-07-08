@@ -57,3 +57,16 @@ func TestNewTask_DoneView(t *testing.T) {
 	m.done = true
 	assert.Contains(t, m.View(), "Problem created")
 }
+
+func TestNewTask_ResizesForNarrowWidth(t *testing.T) {
+	m := newNewTask("unix:///nonexistent")
+
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 32, Height: 12})
+	nm := updated.(newTaskModel)
+
+	assert.Nil(t, cmd)
+	assert.Equal(t, 32, nm.width)
+	assert.Equal(t, 5, nm.textarea.Height())
+	assertMaxLineWidth(t, nm.View(), nm.width)
+	assert.Contains(t, nm.View(), "[ctrl+d] submit")
+}

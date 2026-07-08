@@ -15,6 +15,8 @@ type newTaskModel struct {
 	err      error
 	sent     bool
 	done     bool
+	width    int
+	height   int
 }
 
 type submitProblemMsg struct {
@@ -25,7 +27,8 @@ func newNewTask(socket string) newTaskModel {
 	ta := textarea.New()
 	ta.Placeholder = "owner/repo describe the problem..."
 	ta.Focus()
-	return newTaskModel{textarea: ta, socket: socket}
+	n := newTaskModel{textarea: ta, socket: socket}
+	return n.resize(defaultWidth, defaultHeight)
 }
 
 func (n newTaskModel) Init() tea.Cmd { return textarea.Blink }
@@ -33,6 +36,8 @@ func (n newTaskModel) Init() tea.Cmd { return textarea.Blink }
 func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		return n.resize(msg.Width, msg.Height), nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -64,17 +69,48 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (n newTaskModel) View() string {
+	width := responsiveWidth(n.width)
 	if n.done {
-		return "Problem created.\n\n[esc] back"
+		return truncate("Problem created.", width) + "\n\n" + truncate("[esc] back", width)
 	}
 	if n.sent {
-		return "Submitting...\n\n[esc] back"
+		return truncate("Submitting...", width) + "\n\n" + truncate("[esc] back", width)
 	}
-	view := "New Problem (ctrl+d to submit, esc to cancel)\n\n" + n.textarea.View()
+	view := strings.Join(newTaskHeader(width), "\n") + "\n\n" + n.textarea.View()
 	if n.err != nil {
-		view += "\n\nError: " + n.err.Error()
+		view += "\n\n" + truncate("Error: "+n.err.Error(), width)
 	}
 	return view
+}
+
+func (n newTaskModel) resize(width, height int) newTaskModel {
+	n.width = responsiveWidth(width)
+	if height <= 0 {
+		n.height = defaultHeight
+	} else {
+		n.height = height
+	}
+	n.textarea.SetWidth(n.width)
+	n.textarea.SetHeight(textareaHeight(n.height))
+	return n
+}
+
+func newTaskHeader(width int) []string {
+	if width >= 46 {
+		return []string{truncate("New Problem (ctrl+d to submit, esc to cancel)", width)}
+	}
+	return []string{
+		truncate("New Problem", width),
+		truncate("[ctrl+d] submit", width),
+		truncate("[esc] cancel", width),
+	}
+}
+
+func textareaHeight(height int) int {
+	if height <= 0 {
+		height = defaultHeight
+	}
+	return max(3, height-7)
 }
 
 func (n newTaskModel) submit(value string) tea.Cmd {

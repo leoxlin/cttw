@@ -17,6 +17,8 @@ type Model struct {
 	Socket   string
 	Problems []api.ProblemResponse
 	Err      error
+	Width    int
+	Height   int
 	newTask  newTaskModel
 }
 
@@ -24,6 +26,8 @@ func New(socket string) *Model {
 	return &Model{
 		Screen:  "dashboard",
 		Socket:  socket,
+		Width:   defaultWidth,
+		Height:  defaultHeight,
 		newTask: newNewTask(socket),
 	}
 }
@@ -40,6 +44,11 @@ func (m *Model) fetchProblems() tea.Msg {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.Width = msg.Width
+		m.Height = msg.Height
+		m.newTask = m.newTask.resize(msg.Width, msg.Height)
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
