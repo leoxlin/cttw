@@ -11,7 +11,8 @@ import (
 
 func TestNewTask_SubmitSuccessPath(t *testing.T) {
 	m := newNewTask("unix:///nonexistent")
-	m.textarea.SetValue("owner/repo add OAuth2 login")
+	m.repo.SetValue("owner/repo")
+	m.description.SetValue("add OAuth2 login")
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	nm := updated.(newTaskModel)
@@ -32,17 +33,27 @@ func TestNewTask_SubmitSuccessPath(t *testing.T) {
 
 func TestNewTask_SubmitValidationError(t *testing.T) {
 	m := newNewTask("unix:///nonexistent")
-	m.textarea.SetValue("invalid")
+	m.repo.SetValue("invalid")
+	m.description.SetValue("add OAuth2 login")
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	nm := updated.(newTaskModel)
-	assert.True(t, nm.sent)
+	assert.False(t, nm.sent)
+	assert.Nil(t, cmd)
+	require.Error(t, nm.err)
+	assert.Contains(t, nm.err.Error(), "owner/name")
+}
 
-	msg := cmd()
-	require.IsType(t, submitProblemMsg{}, msg)
-	submit := msg.(submitProblemMsg)
-	require.Error(t, submit.err)
-	assert.Contains(t, submit.err.Error(), "owner/repo")
+func TestNewTask_SubmitRequiresDescription(t *testing.T) {
+	m := newNewTask("unix:///nonexistent")
+	m.repo.SetValue("owner/repo")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	nm := updated.(newTaskModel)
+	assert.False(t, nm.sent)
+	assert.Nil(t, cmd)
+	require.Error(t, nm.err)
+	assert.Contains(t, nm.err.Error(), "description")
 }
 
 func TestNewTask_DisplaysError(t *testing.T) {
@@ -52,8 +63,35 @@ func TestNewTask_DisplaysError(t *testing.T) {
 	assert.Contains(t, view, "Error: boom")
 }
 
-func TestNewTask_DoneView(t *testing.T) {
+func TestNewTask_SubmitSuccessReturnsToDashboard(t *testing.T) {
 	m := newNewTask("unix:///nonexistent")
-	m.done = true
-	assert.Contains(t, m.View(), "Problem created")
+	updated, cmd := m.Update(submitProblemMsg{})
+	nm := updated.(newTaskModel)
+	assert.True(t, nm.done)
+
+	msg := cmd()
+	require.IsType(t, switchToDashboardMsg{}, msg)
+}
+
+func TestNewTask_ViewShowsSplitInputsAndLoading(t *testing.T) {
+	m := newNewTask("unix:///nonexistent")
+	view := m.View()
+	assert.Contains(t, view, "Repo owner/name")
+	assert.Contains(t, view, "Description")
+
+	m.sent = true
+	assert.Contains(t, m.View(), "Submitting")
+}
+
+func TestModel_NewTaskResetsOnOpen(t *testing.T) {
+	m := New("unix:///nonexistent")
+	m.newTask.repo.SetValue("old/repo")
+	m.newTask.description.SetValue("old description")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	nm := updated.(*Model)
+	assert.Equal(t, "newtask", nm.Screen)
+	assert.Empty(t, nm.newTask.repo.Value())
+	assert.Empty(t, nm.newTask.description.Value())
+	assert.Nil(t, cmd)
 }
