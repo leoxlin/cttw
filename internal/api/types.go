@@ -13,6 +13,8 @@ type ProblemResponse struct {
 	Description string         `json:"description"`
 	Status      string         `json:"status"`
 	RepoID      string         `json:"repo_id"`
+	RepoOwner   string         `json:"repo_owner,omitempty"`
+	RepoName    string         `json:"repo_name,omitempty"`
 	IssueNumber int            `json:"issue_number"`
 	Tasks       []TaskResponse `json:"tasks,omitempty"`
 	CreatedAt   time.Time      `json:"created_at"`
