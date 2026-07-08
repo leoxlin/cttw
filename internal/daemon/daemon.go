@@ -268,6 +268,7 @@ type taskResponse struct {
 	Description string    `json:"description"`
 	Status      string    `json:"status"`
 	PRNumber    int       `json:"pr_number,omitempty"`
+	IssueNumber int       `json:"issue_number,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -289,6 +290,7 @@ func problemToResponse(p *store.Problem, tasks []store.Task) problemResponse {
 			Description: t.Description,
 			Status:      t.Status,
 			PRNumber:    t.PRNumber,
+			IssueNumber: t.IssueNumber,
 			CreatedAt:   t.CreatedAt,
 			UpdatedAt:   t.UpdatedAt,
 		})
