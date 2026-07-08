@@ -131,7 +131,7 @@ type InitializeResponse struct {
 type NewSessionRequest struct {
 	CWD                   string      `json:"cwd"`
 	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
-	McpServers            []McpServer `json:"mcpServers,omitempty"`
+	McpServers            []McpServer `json:"mcpServers"`
 }
 
 type McpServer struct {

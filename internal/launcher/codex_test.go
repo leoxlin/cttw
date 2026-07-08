@@ -51,11 +51,11 @@ func main() {
 		switch e.Method {
 		case "initialize":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"protocolVersion\":1,\"agentCapabilities\":{},\"agentInfo\":{\"name\":\"fake\",\"version\":\"1\"},\"authMethods\":[]}`" + `)})
-		case "newSession":
+		case "session/new":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"sessionId\":\"s1\"}`" + `)})
-		case "closeSession":
+		case "session/close":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{}`" + `)})
-		case "prompt":
+		case "session/prompt":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"stopReason\":\"end_turn\",\"content\":\"done\"}`" + `)})
 		default:
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{}`" + `)})
@@ -99,6 +99,27 @@ func runCmd(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func TestResolveLocalCommand_ExplicitPath(t *testing.T) {
+	got, err := resolveLocalCommand("/tmp/codex-acp")
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/codex-acp", got)
+}
+
+func TestResolveLocalCommand_MiseFallback(t *testing.T) {
+	dir := t.TempDir()
+	resolved := filepath.Join(dir, "tools", "codex-acp")
+	require.NoError(t, os.MkdirAll(filepath.Dir(resolved), 0o755))
+
+	mise := filepath.Join(dir, "mise")
+	script := "#!/bin/sh\nif [ \"$1\" = \"which\" ] && [ \"$2\" = \"cttw-missing-agent\" ]; then\n  printf '%s\\n' '" + resolved + "'\n  exit 0\nfi\nexit 1\n"
+	require.NoError(t, os.WriteFile(mise, []byte(script), 0o755))
+	t.Setenv("PATH", dir)
+
+	got, err := resolveLocalCommand("cttw-missing-agent")
+	require.NoError(t, err)
+	assert.Equal(t, resolved, got)
 }
 
 func TestDefaultHandler_ResolvePath(t *testing.T) {
@@ -173,11 +194,11 @@ func main() {
 		switch e.Method {
 		case "initialize":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"protocolVersion\":1,\"agentCapabilities\":{},\"agentInfo\":{\"name\":\"fake\",\"version\":\"1\"},\"authMethods\":[]}`" + `)})
-		case "newSession":
+		case "session/new":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"sessionId\":\"s1\"}`" + `)})
-		case "closeSession":
+		case "session/close":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{}`" + `)})
-		case "prompt":
+		case "session/prompt":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"stopReason\":\"end_turn\",\"content\":\"done\"}`" + `)})
 		default:
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{}`" + `)})

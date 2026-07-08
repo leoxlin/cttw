@@ -244,6 +244,43 @@ func (s *Store) UpdateRepo(ctx context.Context, r *Repo) error {
 	return nil
 }
 
+// DeleteRepo removes a repo and its associated problems and tasks.
+func (s *Store) DeleteRepo(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete repo: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE repo_id = ?`, id); err != nil {
+		return fmt.Errorf("delete repo tasks: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM problems WHERE repo_id = ?`, id); err != nil {
+		return fmt.Errorf("delete repo problems: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM repos WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete repo: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete repo rows affected: %w", err)
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete repo: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // GetRepo retrieves a repo by its ID.
 func (s *Store) GetRepo(ctx context.Context, id string) (*Repo, error) {
 	row := s.db.QueryRowContext(ctx,

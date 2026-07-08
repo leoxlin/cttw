@@ -20,7 +20,7 @@ func tuiCmd() *cobra.Command {
 }
 
 func runTUI() error {
-	cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
+	cfg, err := config.LoadClient(os.Getenv("CTTW_CONFIG"), nil)
 	if err != nil {
 		return err
 	}
