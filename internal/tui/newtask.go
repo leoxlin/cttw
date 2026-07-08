@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/llin/cttw/internal/api"
 )
 
 type newTaskModel struct {
@@ -87,7 +86,7 @@ func (n newTaskModel) submit(value string) tea.Cmd {
 		if len(repoParts) != 2 {
 			return submitProblemMsg{err: fmt.Errorf("repo must be owner/name")}
 		}
-		client := api.NewClient(n.socket)
+		client := newProblemAPIClient(n.socket)
 		_, err := client.CreateProblem(repoParts[0], repoParts[1], parts[1])
 		return submitProblemMsg{err: err}
 	}

@@ -12,6 +12,15 @@ type problemsMsg struct {
 
 type switchToDashboardMsg struct{}
 
+type problemAPIClient interface {
+	CreateProblem(owner, repo, description string) (*api.ProblemResponse, error)
+	ListProblems() ([]api.ProblemResponse, error)
+}
+
+var newProblemAPIClient = func(socket string) problemAPIClient {
+	return api.NewClient(socket)
+}
+
 type Model struct {
 	Screen   string // dashboard | newtask
 	Socket   string
@@ -33,7 +42,7 @@ func (m *Model) Init() tea.Cmd {
 }
 
 func (m *Model) fetchProblems() tea.Msg {
-	client := api.NewClient(m.Socket)
+	client := newProblemAPIClient(m.Socket)
 	problems, err := client.ListProblems()
 	return problemsMsg{problems: problems, err: err}
 }
@@ -46,6 +55,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "n":
 			m.Screen = "newtask"
+			return m, nil
 		case "esc":
 			m.Screen = "dashboard"
 			return m, m.fetchProblems
