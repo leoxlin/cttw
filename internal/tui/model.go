@@ -12,6 +12,11 @@ type problemsMsg struct {
 
 type switchToDashboardMsg struct{}
 
+const (
+	ScreenDashboard  = "dashboard"
+	ScreenNewProblem = "newtask"
+)
+
 type Model struct {
 	Screen   string // dashboard | newtask
 	Socket   string
@@ -22,7 +27,7 @@ type Model struct {
 
 func New(socket string) *Model {
 	return &Model{
-		Screen:  "dashboard",
+		Screen:  ScreenDashboard,
 		Socket:  socket,
 		newTask: newNewTask(socket),
 	}
@@ -45,19 +50,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "n":
-			m.Screen = "newtask"
+			m.Screen = ScreenNewProblem
 		case "esc":
-			m.Screen = "dashboard"
+			m.Screen = ScreenDashboard
 			return m, m.fetchProblems
 		}
 	case problemsMsg:
 		m.Problems = msg.problems
 		m.Err = msg.err
 	case switchToDashboardMsg:
-		m.Screen = "dashboard"
+		m.Screen = ScreenDashboard
 		return m, m.fetchProblems
 	}
-	if m.Screen == "newtask" {
+	if m.Screen == ScreenNewProblem {
 		updated, cmd := m.newTask.Update(msg)
 		m.newTask = updated.(newTaskModel)
 		return m, cmd
@@ -67,7 +72,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) View() string {
 	switch m.Screen {
-	case "newtask":
+	case ScreenNewProblem:
 		return m.newTask.View()
 	default:
 		return dashboardView(m)
