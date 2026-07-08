@@ -219,6 +219,7 @@ func TestModelDashboardSelectionAndDetailView(t *testing.T) {
 				Title:       "render metadata",
 				Description: "show timestamps and related work",
 				Status:      "completed",
+				IssueNumber: 9,
 				PRNumber:    34,
 			},
 		},
@@ -239,6 +240,7 @@ func TestModelDashboardSelectionAndDetailView(t *testing.T) {
 	assert.Contains(t, view, "ship detail view")
 	assert.Contains(t, view, "Tasks (1):")
 	assert.Contains(t, view, "render metadata")
+	assert.Contains(t, view, "Issue: #9")
 	assert.Contains(t, view, "PR: #34")
 	assert.Contains(t, view, "Actions: [r] refresh  [b/esc] back  [n] new problem  [q] quit")
 }

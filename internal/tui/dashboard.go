@@ -143,6 +143,9 @@ func taskSummary(tasks []api.TaskResponse) string {
 	lines := []string{fmt.Sprintf("Tasks (%d):", len(tasks))}
 	for _, t := range tasks {
 		line := fmt.Sprintf("  %s  %-12s  %s", strutil.ShortID(t.ID), t.Status, t.Title)
+		if t.IssueNumber > 0 {
+			line += fmt.Sprintf("  Issue: #%d", t.IssueNumber)
+		}
 		if t.PRNumber > 0 {
 			line += fmt.Sprintf("  PR: #%d", t.PRNumber)
 		}
