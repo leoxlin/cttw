@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,24 @@ import (
 )
 
 const defaultRequestTimeout = 30 * time.Second
+
+type HTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	body := strings.TrimSpace(e.Body)
+	if body == "" {
+		return fmt.Sprintf("daemon API %d", e.StatusCode)
+	}
+	return fmt.Sprintf("daemon API %d: %s", e.StatusCode, body)
+}
+
+func IsDisconnected(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
+}
 
 type Client struct {
 	Socket string
@@ -35,12 +54,89 @@ func NewClient(socket string) *Client {
 	}
 }
 
+func (c *Client) CreateProject(req CreateProjectRequest) (*ProjectResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	resp, err := c.post("/api/v1/projects", body)
+	if err != nil {
+		return nil, err
+	}
+	var project ProjectResponse
+	if err := json.Unmarshal(resp, &project); err != nil {
+		return nil, err
+	}
+	return &project, nil
+}
+
+func (c *Client) ListProjects() ([]ProjectResponse, error) {
+	resp, err := c.get("/api/v1/projects")
+	if err != nil {
+		return nil, err
+	}
+	var projects []ProjectResponse
+	if err := json.Unmarshal(resp, &projects); err != nil {
+		return nil, err
+	}
+	return projects, nil
+}
+
+func (c *Client) GetProject(id string) (*ProjectResponse, error) {
+	resp, err := c.get("/api/v1/projects/" + url.PathEscape(id))
+	if err != nil {
+		return nil, err
+	}
+	var project ProjectResponse
+	if err := json.Unmarshal(resp, &project); err != nil {
+		return nil, err
+	}
+	return &project, nil
+}
+
+func (c *Client) UpdateProject(id string, req UpdateProjectRequest) (*ProjectResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	resp, err := c.put("/api/v1/projects/"+url.PathEscape(id), body)
+	if err != nil {
+		return nil, err
+	}
+	var project ProjectResponse
+	if err := json.Unmarshal(resp, &project); err != nil {
+		return nil, err
+	}
+	return &project, nil
+}
+
+func (c *Client) DeleteProject(id string) error {
+	_, err := c.delete("/api/v1/projects/" + url.PathEscape(id))
+	return err
+}
+
 func (c *Client) CreateProblem(owner, repo, description string) (*ProblemResponse, error) {
 	body, err := json.Marshal(CreateProblemRequest{Owner: owner, Repo: repo, Description: description})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 	resp, err := c.post("/api/v1/problems", body)
+	if err != nil {
+		return nil, err
+	}
+	var pr ProblemResponse
+	if err := json.Unmarshal(resp, &pr); err != nil {
+		return nil, err
+	}
+	return &pr, nil
+}
+
+func (c *Client) UpdateProblem(id, description string) (*ProblemResponse, error) {
+	body, err := json.Marshal(UpdateProblemRequest{Description: description})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	resp, err := c.patch("/api/v1/problems/"+url.PathEscape(id), body)
 	if err != nil {
 		return nil, err
 	}
@@ -107,17 +203,35 @@ func (c *Client) get(path string) ([]byte, error) {
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("daemon %d: %s", resp.StatusCode, string(b))
+		return nil, &HTTPError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
 	return b, nil
 }
 
 func (c *Client) post(path string, body []byte) ([]byte, error) {
-	req, err := http.NewRequest("POST", c.url(path), bytes.NewReader(body))
+	return c.do("POST", path, body)
+}
+
+func (c *Client) patch(path string, body []byte) ([]byte, error) {
+	return c.do("PATCH", path, body)
+}
+
+func (c *Client) put(path string, body []byte) ([]byte, error) {
+	return c.do("PUT", path, body)
+}
+
+func (c *Client) delete(path string) ([]byte, error) {
+	return c.do("DELETE", path, nil)
+}
+
+func (c *Client) do(method, path string, body []byte) ([]byte, error) {
+	req, err := http.NewRequest(method, c.url(path), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -128,7 +242,7 @@ func (c *Client) post(path string, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("daemon %d: %s", resp.StatusCode, string(b))
+		return nil, &HTTPError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
 	return b, nil
 }

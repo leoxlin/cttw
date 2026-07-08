@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -32,15 +33,18 @@ type Client struct {
 	closed  bool
 	closeCh chan struct{}
 	// errCh is a best-effort sink for malformed messages and unmatched responses.
-	errCh   chan error
+	errCh chan error
+
+	sessionContent map[string]*strings.Builder
 }
 
 func NewClient(transport Transport) *Client {
 	return &Client{
-		transport: transport,
-		pending:   make(map[int64]chan Envelope),
-		closeCh:   make(chan struct{}),
-		errCh:     make(chan error, 1),
+		transport:      transport,
+		pending:        make(map[int64]chan Envelope),
+		closeCh:        make(chan struct{}),
+		errCh:          make(chan error, 1),
+		sessionContent: make(map[string]*strings.Builder),
 	}
 }
 
@@ -83,6 +87,9 @@ func (c *Client) Start(ctx context.Context) error {
 		}
 		if env.ID == nil && env.Method != "" {
 			// Notification; dispatch to handler without responding.
+			if env.Method == "session/update" {
+				c.recordSessionUpdate(env.Params)
+			}
 			c.mu.Lock()
 			h := c.handler
 			c.mu.Unlock()
@@ -95,6 +102,57 @@ func (c *Client) Start(ctx context.Context) error {
 			c.routeResponse(env)
 		}
 	}
+}
+
+func (c *Client) recordSessionUpdate(params json.RawMessage) {
+	var msg struct {
+		SessionID string `json:"sessionId"`
+		Update    struct {
+			SessionUpdate string       `json:"sessionUpdate"`
+			Content       ContentBlock `json:"content"`
+		} `json:"update"`
+	}
+	if err := json.Unmarshal(params, &msg); err != nil {
+		return
+	}
+	if msg.SessionID == "" || msg.Update.SessionUpdate != "agent_message_chunk" {
+		return
+	}
+	if msg.Update.Content.Type != "text" || msg.Update.Content.Text == "" {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.sessionContent[msg.SessionID]
+	if b == nil {
+		b = &strings.Builder{}
+		c.sessionContent[msg.SessionID] = b
+	}
+	b.WriteString(msg.Update.Content.Text)
+}
+
+func (c *Client) resetSessionContent(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.sessionContent, sessionID)
+}
+
+func (c *Client) takeSessionContent(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.sessionContent[sessionID]
+	delete(c.sessionContent, sessionID)
+	if b == nil {
+		return ""
+	}
+	return b.String()
 }
 
 func (c *Client) isClosed() bool {
@@ -279,7 +337,10 @@ func (c *Client) Initialize(ctx context.Context, req InitializeRequest) (*Initia
 }
 
 func (c *Client) NewSession(ctx context.Context, req NewSessionRequest) (*NewSessionResponse, error) {
-	env, err := c.call(ctx, "newSession", req)
+	if req.McpServers == nil {
+		req.McpServers = []McpServer{}
+	}
+	env, err := c.call(ctx, "session/new", req)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +355,7 @@ func (c *Client) NewSession(ctx context.Context, req NewSessionRequest) (*NewSes
 }
 
 func (c *Client) CloseSession(ctx context.Context, req CloseSessionRequest) error {
-	env, err := c.call(ctx, "closeSession", req)
+	env, err := c.call(ctx, "session/close", req)
 	if err != nil {
 		return err
 	}
@@ -305,7 +366,8 @@ func (c *Client) CloseSession(ctx context.Context, req CloseSessionRequest) erro
 }
 
 func (c *Client) Prompt(ctx context.Context, req PromptRequest) (*PromptResponse, error) {
-	env, err := c.call(ctx, "prompt", req)
+	c.resetSessionContent(req.SessionID)
+	env, err := c.call(ctx, "session/prompt", req)
 	if err != nil {
 		return nil, err
 	}
@@ -315,6 +377,9 @@ func (c *Client) Prompt(ctx context.Context, req PromptRequest) (*PromptResponse
 	var res PromptResponse
 	if err := json.Unmarshal(env.Result, &res); err != nil {
 		return nil, err
+	}
+	if res.Content == "" {
+		res.Content = c.takeSessionContent(req.SessionID)
 	}
 	return &res, nil
 }

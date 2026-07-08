@@ -1,14 +1,15 @@
-# cttw — Claudivicus Take The Wheel
+# cttw
 
-A TUI CLI + daemon that coordinates ACP agents to break user problems into tasks, tracks them via GitHub issues/sub-issues, and opens stacked PRs.
+> Claudivicus! Take the wheel.
+
+A TUI CLI + daemon that coordinates ACP agents to break user problems into
+tasks, tracks them via GitHub issues/sub-issues, and opens stacked PRs.
 
 ## Quick Start
 
 ```bash
 export GITHUB_TOKEN=...   # optional if `gh auth token` is available
 export CTTW_REPO=owner/repo
-# Install an ACP-compatible agent adapter, e.g.:
-#   https://github.com/zed-industries/codex-acp
 cttw daemon start
 cttw problem owner/repo "add OAuth2 login"
 cttw
@@ -72,3 +73,34 @@ mise install
 mise run build
 mise run test
 ```
+
+To run the TUI locally from source:
+
+```bash
+export GITHUB_TOKEN=...   # optional if `gh auth token` is available
+export CTTW_REPO=owner/repo[:branch]
+mise run dev              # equivalent to `go run ./cmd/cttw`
+```
+
+The default command launches the interactive TUI. Start the local daemon first
+when you want the TUI to show live problem/task state:
+
+```bash
+go run ./cmd/cttw daemon start
+go run ./cmd/cttw tui
+go run ./cmd/cttw daemon stop
+```
+
+### Environment variables
+
+- `GITHUB_TOKEN`: GitHub API token. Required unless `gh auth token` is available.
+- `CTTW_REPO`: comma-separated repositories in `owner/name[:branch]` form. The
+  branch defaults to `main`.
+- `CTTW_CONFIG`: optional path to a TOML config file. Defaults to
+  `~/.config/cttw/config.toml`.
+- `DAEMON_SOCKET`: optional daemon API socket override. Defaults to
+  `unix:///tmp/cttw.sock`.
+- `CTTW_DB`: optional daemon SQLite database path. Defaults to
+  `~/.local/share/cttw/cttw.db`.
+- `CTTW_REPOS`: optional daemon checkout root. Defaults to
+  `~/.local/share/cttw/repos`.

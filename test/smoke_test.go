@@ -159,11 +159,11 @@ func main() {
 		switch e.Method {
 		case "initialize":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"protocolVersion\":1,\"agentCapabilities\":{},\"agentInfo\":{\"name\":\"fake\",\"version\":\"1\"},\"authMethods\":[]}`" + `)})
-		case "newSession":
+		case "session/new":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"sessionId\":\"s1\"}`" + `)})
-		case "closeSession":
+		case "session/close":
 			res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{}`" + `)})
-		case "prompt":
+		case "session/prompt":
 			call++
 			_ = os.WriteFile(counterPath, []byte(fmt.Sprintf("%d", call)), 0644)
 			if call == 1 {
