@@ -35,6 +35,81 @@ func TestClient_CreateProblem_Accepts202(t *testing.T) {
 	assert.Equal(t, want, *got)
 }
 
+func TestClient_ProjectCRUD(t *testing.T) {
+	created := time.Date(2026, 7, 5, 10, 0, 0, 0, time.UTC)
+	updated := time.Date(2026, 7, 5, 11, 0, 0, 0, time.UTC)
+	project := ProjectResponse{
+		ID:            "r1",
+		Owner:         "llin",
+		Name:          "cttw",
+		LocalDir:      "/tmp/cttw",
+		DefaultBranch: "main",
+		CloneURL:      "https://github.com/llin/cttw.git",
+		CreatedAt:     created,
+		UpdatedAt:     updated,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects":
+			assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+			var req CreateProjectRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			assert.Equal(t, "llin", req.Owner)
+			assert.Equal(t, "cttw", req.Name)
+			w.WriteHeader(http.StatusCreated)
+			require.NoError(t, json.NewEncoder(w).Encode(project))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
+			require.NoError(t, json.NewEncoder(w).Encode([]ProjectResponse{project}))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/r1":
+			require.NoError(t, json.NewEncoder(w).Encode(project))
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/r1":
+			assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+			var req UpdateProjectRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			assert.Equal(t, "cttw-renamed", req.Name)
+			project.Name = req.Name
+			require.NoError(t, json.NewEncoder(w).Encode(project))
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/r1":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Listener.Addr().String())
+	createdProject, err := client.CreateProject(CreateProjectRequest{
+		Owner:         "llin",
+		Name:          "cttw",
+		LocalDir:      "/tmp/cttw",
+		DefaultBranch: "main",
+		CloneURL:      "https://github.com/llin/cttw.git",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, project, *createdProject)
+
+	projects, err := client.ListProjects()
+	require.NoError(t, err)
+	assert.Equal(t, []ProjectResponse{project}, projects)
+
+	got, err := client.GetProject("r1")
+	require.NoError(t, err)
+	assert.Equal(t, project, *got)
+
+	updatedProject, err := client.UpdateProject("r1", UpdateProjectRequest{
+		Owner:         "llin",
+		Name:          "cttw-renamed",
+		LocalDir:      "/tmp/cttw",
+		DefaultBranch: "main",
+		CloneURL:      "https://github.com/llin/cttw.git",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "cttw-renamed", updatedProject.Name)
+
+	require.NoError(t, client.DeleteProject("r1"))
+}
+
 func TestClient_CreateProblem(t *testing.T) {
 	created := time.Date(2026, 7, 5, 10, 0, 0, 0, time.UTC)
 	updated := time.Date(2026, 7, 5, 11, 0, 0, 0, time.UTC)
@@ -67,6 +142,33 @@ func TestClient_CreateProblem(t *testing.T) {
 
 	client := NewClient(server.Listener.Addr().String())
 	got, err := client.CreateProblem("llin", "cttw", "build API")
+	require.NoError(t, err)
+	assert.Equal(t, want, *got)
+}
+
+func TestClient_UpdateProblem(t *testing.T) {
+	want := ProblemResponse{
+		ID:          "p1",
+		Description: "updated",
+		Status:      "ready",
+		RepoID:      "r1",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/problems/p1", r.URL.Path)
+		assert.Equal(t, http.MethodPatch, r.Method)
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+		var req UpdateProblemRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "updated", req.Description)
+
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(want))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Listener.Addr().String())
+	got, err := client.UpdateProblem("p1", "updated")
 	require.NoError(t, err)
 	assert.Equal(t, want, *got)
 }
