@@ -73,14 +73,20 @@ func TestClient_InitializeAndPrompt(t *testing.T) {
 		res, _ := json.Marshal(Envelope{
 			JSONRPC: "2.0",
 			ID:      env.ID,
-			Result: json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"fake","version":"1"},"authMethods":[]}`),
+			Result:  json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"fake","version":"1"},"authMethods":[]}`),
 		})
 		_ = agentIn.Send(ctx, res)
 
 		// Reply to prompt with stop_reason end_turn.
 		line, _ = agentIn.Recv(ctx)
 		_ = json.Unmarshal(line, &env)
-		assert.Equal(t, "prompt", env.Method)
+		assert.Equal(t, "session/prompt", env.Method)
+		update, _ := json.Marshal(Envelope{
+			JSONRPC: "2.0",
+			Method:  "session/update",
+			Params:  json.RawMessage(`{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}`),
+		})
+		_ = agentIn.Send(ctx, update)
 		res, _ = json.Marshal(Envelope{
 			JSONRPC: "2.0",
 			ID:      env.ID,
@@ -102,6 +108,7 @@ func TestClient_InitializeAndPrompt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, StopReasonEndTurn, promptRes.StopReason)
+	assert.Equal(t, "done", promptRes.Content)
 
 	_ = client.Close()
 	_ = agentIn.Close()
@@ -321,10 +328,10 @@ func TestClient_ResponseDuringCloseDoesNotPanic(t *testing.T) {
 // eofTransport returns EOF immediately so the client read loop exits cleanly.
 type eofTransport struct{}
 
-func (eofTransport) Start(ctx context.Context) error { return nil }
+func (eofTransport) Start(ctx context.Context) error             { return nil }
 func (eofTransport) Send(ctx context.Context, data []byte) error { return nil }
-func (eofTransport) Recv(ctx context.Context) ([]byte, error) { return nil, io.EOF }
-func (eofTransport) Close() error { return nil }
+func (eofTransport) Recv(ctx context.Context) ([]byte, error)    { return nil, io.EOF }
+func (eofTransport) Close() error                                { return nil }
 
 func TestClient_ConcurrentRouteResponseAndClose(t *testing.T) {
 	for i := 0; i < 200; i++ {

@@ -42,7 +42,7 @@ func TestDashboardViewSummarizesProjectDataAndWorkflows(t *testing.T) {
 		},
 	}
 
-	view := dashboardView(m)
+	view := dashboardView(m, 80)
 
 	assert.Contains(t, view, "Project Summary")
 	assert.Contains(t, view, "Problems: 3 total, 1 pending, 1 ready, 1 failed")
@@ -56,14 +56,14 @@ func TestDashboardViewSummarizesProjectDataAndWorkflows(t *testing.T) {
 }
 
 func TestDashboardViewEmptyStatePointsToNewProblemWorkflow(t *testing.T) {
-	view := dashboardView(&Model{})
+	view := dashboardView(&Model{}, 80)
 
 	assert.Contains(t, view, "Problems: 0 total, 0 pending, 0 ready, 0 failed")
 	assert.Contains(t, view, "No problems yet. Press [n] to create one.")
 }
 
 func TestDashboardViewDisplaysLoadErrors(t *testing.T) {
-	view := dashboardView(&Model{Err: errors.New("daemon unavailable")})
+	view := dashboardView(&Model{Err: errors.New("daemon unavailable")}, 80)
 
 	assert.Contains(t, view, "Error: daemon unavailable")
 }

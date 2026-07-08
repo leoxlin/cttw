@@ -25,7 +25,7 @@ func problemCmd() *cobra.Command {
 			}
 			owner, name := parts[0], parts[1]
 
-			cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
+			cfg, err := config.LoadClient(os.Getenv("CTTW_CONFIG"), nil)
 			if err != nil {
 				return err
 			}
@@ -45,7 +45,7 @@ func problemsCmd() *cobra.Command {
 		Use:   "problems",
 		Short: "List problems",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(os.Getenv("CTTW_CONFIG"), nil)
+			cfg, err := config.LoadClient(os.Getenv("CTTW_CONFIG"), nil)
 			if err != nil {
 				return err
 			}

@@ -24,6 +24,7 @@ type submitProblemMsg struct {
 func newNewTask(socket string) newTaskModel {
 	ta := textarea.New()
 	ta.Placeholder = "owner/repo describe the problem..."
+	ta.ShowLineNumbers = false
 	ta.Focus()
 	return newTaskModel{textarea: ta, socket: socket}
 }
@@ -65,16 +66,23 @@ func (n newTaskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (n newTaskModel) View() string {
 	if n.done {
-		return "Problem created.\n\n[esc] back"
+		return sectionTitleStyle.Render("Problem created") + "\n\n" + helpStyle.Render("[esc] back")
 	}
 	if n.sent {
-		return "Submitting...\n\n[esc] back"
+		return sectionTitleStyle.Render("Submitting...") + "\n\n" + helpStyle.Render("[esc] back")
 	}
-	view := "New Problem (ctrl+d to submit, esc to cancel)\n\n" + n.textarea.View()
+	view := sectionTitleStyle.Render("New Problem") + "\n" +
+		helpStyle.Render("ctrl+d to submit, esc to cancel") + "\n\n" +
+		n.textarea.View()
 	if n.err != nil {
-		view += "\n\nError: " + n.err.Error()
+		view += "\n\n" + errorStyle.Render("Error: "+n.err.Error())
 	}
 	return view
+}
+
+func (n *newTaskModel) SetSize(width, height int) {
+	n.textarea.SetWidth(maxInt(width, 24))
+	n.textarea.SetHeight(maxInt(height, 5))
 }
 
 func (n newTaskModel) submit(value string) tea.Cmd {

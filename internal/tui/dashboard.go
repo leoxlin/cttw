@@ -4,51 +4,52 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/llin/cttw/internal/api"
 	"github.com/llin/cttw/internal/strutil"
 )
 
-var titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-
-func dashboardView(m *Model) string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("cttw — Claudivicus Take The Wheel"))
-	b.WriteString("\n\n")
+func dashboardView(m *Model, width int) string {
+	var lines []string
+	lines = append(lines, sectionTitleStyle.Render("Problems"), "")
 	if m.Err != nil {
-		fmt.Fprintf(&b, "Error: %v\n\n", m.Err)
+		lines = append(lines, errorStyle.Render(fmt.Sprintf("Error: %v", m.Err)), "")
 	}
 
 	stats := newDashboardStats(m.Problems)
-	b.WriteString("Project Summary\n")
-	fmt.Fprintf(&b, "  Problems: %d total, %d pending, %d ready, %d failed\n", stats.problems, stats.pendingProblems, stats.readyProblems, stats.failedProblems)
-	fmt.Fprintf(&b, "  Repos:    %d tracked\n", stats.repos)
+	lines = append(lines,
+		sectionTitleStyle.Render("Project Summary"),
+		fmt.Sprintf("Problems: %d total, %d pending, %d ready, %d failed", stats.problems, stats.pendingProblems, stats.readyProblems, stats.failedProblems),
+		fmt.Sprintf("Repos:    %d tracked", stats.repos),
+	)
 	if stats.tasks > 0 {
-		fmt.Fprintf(&b, "  Tasks:    %d total, %d pending, %d running, %d completed, %d failed\n", stats.tasks, stats.pendingTasks, stats.runningTasks, stats.completedTasks, stats.failedTasks)
+		lines = append(lines, fmt.Sprintf("Tasks:    %d total, %d pending, %d running, %d completed, %d failed", stats.tasks, stats.pendingTasks, stats.runningTasks, stats.completedTasks, stats.failedTasks))
 	}
-	b.WriteString("\n")
+	lines = append(lines, "")
 
-	b.WriteString("Workflows\n")
-	b.WriteString("  [n]   New problem     create work for a repository\n")
-	b.WriteString("  [esc] Refresh         reload daemon data\n")
-	b.WriteString("  [q]   Quit            leave cttw\n\n")
-
+	lines = append(lines,
+		sectionTitleStyle.Render("Workflows"),
+		"[n]   New problem     create work for a repository",
+		"[esc] Refresh         reload daemon data",
+		"[q]   Quit            leave cttw",
+		"",
+		sectionTitleStyle.Render("Recent Problems"),
+	)
 	if len(m.Problems) == 0 {
-		b.WriteString("Recent Problems\n")
-		b.WriteString("  No problems yet. Press [n] to create one.\n")
+		lines = append(lines, mutedStyle.Render("No problems yet. Press [n] to create one."), "")
 	} else {
-		b.WriteString("Recent Problems\n")
+		lines = append(lines, helpStyle.Render("ID        Status       Description"))
 		for _, p := range m.Problems {
 			taskSummary := ""
 			if len(p.Tasks) > 0 {
 				taskSummary = fmt.Sprintf("  %d tasks", len(p.Tasks))
 			}
-			line := fmt.Sprintf("  %s  %-12s  %s%s", strutil.ShortID(p.ID), p.Status, p.Description, taskSummary)
-			b.WriteString(truncate(line, 78))
-			b.WriteString("\n")
+			line := fmt.Sprintf("%-8s  %-11s  %s%s", strutil.ShortID(p.ID), p.Status, p.Description, taskSummary)
+			lines = append(lines, truncate(line, width))
 		}
+		lines = append(lines, "")
 	}
-	return b.String()
+	lines = append(lines, helpStyle.Render("Keys: [n] new problem  [q] quit  [esc] refresh"))
+	return strings.Join(lines, "\n")
 }
 
 type dashboardStats struct {

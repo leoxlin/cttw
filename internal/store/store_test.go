@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -74,6 +75,29 @@ func TestRepo_CRUD(t *testing.T) {
 	repos, err := s.ListRepos(ctx)
 	require.NoError(t, err)
 	assert.Len(t, repos, 1)
+
+	repo.Name = "cttw-renamed"
+	repo.CloneURL = "https://github.com/llin/cttw-renamed.git"
+	require.NoError(t, s.UpdateRepo(ctx, repo))
+	updated, err := s.GetRepo(ctx, repo.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "cttw-renamed", updated.Name)
+	assert.Equal(t, "https://github.com/llin/cttw-renamed.git", updated.CloneURL)
+
+	problem, err := s.CreateProblem(ctx, "build API", repo.ID)
+	require.NoError(t, err)
+	_, err = s.CreateTask(ctx, problem.ID, repo.ID, "add handler", "implement POST")
+	require.NoError(t, err)
+
+	require.NoError(t, s.DeleteRepo(ctx, repo.ID))
+	_, err = s.GetRepo(ctx, repo.ID)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+	problems, err := s.ListProblemsByRepo(ctx, repo.ID)
+	require.NoError(t, err)
+	assert.Empty(t, problems)
+	tasks, err := s.ListTasksByProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
 }
 
 func TestProblemAndTasks_CRUD(t *testing.T) {
