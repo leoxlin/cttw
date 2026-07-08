@@ -259,6 +259,78 @@ func TestServer_CreateProblem_LazyRegistersRepo(t *testing.T) {
 	assert.Equal(t, "main", r.DefaultBranch)
 }
 
+func TestServer_ProjectCRUD(t *testing.T) {
+	s, err := store.New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
+	srv := &Server{
+		Store:    s,
+		Socket:   "unix://" + sockFile,
+		shutdown: make(chan struct{}),
+	}
+
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(srv.Shutdown)
+	waitForSocket(t, sockFile)
+
+	body, _ := json.Marshal(map[string]string{
+		"owner":          "llin",
+		"name":           "cttw",
+		"local_dir":      "/tmp/cttw",
+		"default_branch": "main",
+		"clone_url":      "https://github.com/llin/cttw.git",
+	})
+	resp, err := unixPost(sockFile, "/api/v1/projects", body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var created projectResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	assert.Equal(t, "llin", created.Owner)
+	assert.Equal(t, "cttw", created.Name)
+	assert.NotZero(t, created.CreatedAt)
+	assert.NotZero(t, created.UpdatedAt)
+
+	resp, err = unixGet(sockFile, "/api/v1/projects/"+created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var got projectResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	assert.Equal(t, created.ID, got.ID)
+
+	updateBody, _ := json.Marshal(map[string]string{
+		"owner":          "llin",
+		"name":           "cttw-renamed",
+		"local_dir":      "/tmp/cttw-renamed",
+		"default_branch": "trunk",
+	})
+	resp, err = unixPut(sockFile, "/api/v1/projects/"+created.ID, updateBody)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var updated projectResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&updated))
+	assert.Equal(t, "cttw-renamed", updated.Name)
+	assert.Equal(t, "trunk", updated.DefaultBranch)
+
+	resp, err = unixGet(sockFile, "/api/v1/projects")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var projects []projectResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&projects))
+	require.Len(t, projects, 1)
+	assert.Equal(t, updated.ID, projects[0].ID)
+
+	resp, err = unixDelete(sockFile, "/api/v1/projects/"+created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	resp, err = unixGet(sockFile, "/api/v1/projects/"+created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
 func TestServer_CreateAndGetProblem(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
@@ -356,4 +428,33 @@ func unixGet(sock, path string) (*http.Response, error) {
 		Timeout: 5 * time.Second,
 	}
 	return c.Get("http://unix" + path)
+}
+
+func unixPut(sock, path string, body []byte) (*http.Response, error) {
+	c := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+	req, _ := http.NewRequest(http.MethodPut, "http://unix"+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return c.Do(req)
+}
+
+func unixDelete(sock, path string) (*http.Response, error) {
+	c := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+	req, _ := http.NewRequest(http.MethodDelete, "http://unix"+path, nil)
+	return c.Do(req)
 }
