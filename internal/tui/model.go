@@ -10,12 +10,14 @@ type problemsMsg struct {
 	err      error
 }
 
+type switchToDashboardMsg struct {
+	notice string
+}
+
 type problemDetailMsg struct {
 	problem *api.ProblemResponse
 	err     error
 }
-
-type switchToDashboardMsg struct{}
 
 type problemSort string
 
@@ -48,6 +50,7 @@ type Model struct {
 	searching     bool
 	Sort          problemSort
 	SortDesc      bool
+	Notice        string
 	newTask       newTaskModel
 }
 
@@ -103,6 +106,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.Err = nil
 				return m, m.fetchProblems
 			}
+			updated, cmd := m.newTask.Update(msg)
+			m.newTask = updated.(newTaskModel)
+			return m, cmd
 		case screenDetail:
 			return m.updateDetailKey(msg)
 		default:
@@ -113,6 +119,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "q":
 				return m, tea.Quit
 			case "n":
+				m.Notice = ""
+				m.newTask = newNewTask(m.Socket)
 				m.navigate(screenNewTask)
 				return m, nil
 			}
@@ -130,14 +138,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case switchToDashboardMsg:
 		m.navigate(screenDashboard)
+		m.Notice = msg.notice
 		m.Loading = true
 		m.Err = nil
 		return m, m.fetchProblems
-	}
-	if m.Screen == screenNewTask {
-		updated, cmd := m.newTask.Update(msg)
-		m.newTask = updated.(newTaskModel)
-		return m, cmd
 	}
 	return m, nil
 }
@@ -161,6 +165,8 @@ func (m *Model) updateDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.fetchProblem(m.Detail.ID)
 		}
 	case "n":
+		m.Notice = ""
+		m.newTask = newNewTask(m.Socket)
 		m.navigate(screenNewTask)
 		return m, nil
 	}
@@ -225,6 +231,16 @@ func (m *Model) updateDashboardKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			m.DetailErr = nil
 			m.DetailLoading = true
 			return true, m.fetchProblem(selected.ID)
+		}
+		return true, nil
+	case "e":
+		problems := visibleProblems(m)
+		if len(problems) > 0 {
+			m.clampCursor()
+			selected := problems[m.Cursor]
+			m.Notice = ""
+			m.newTask = newEditTask(m.Socket, selected)
+			m.navigate(screenNewTask)
 		}
 		return true, nil
 	case "esc", "r":

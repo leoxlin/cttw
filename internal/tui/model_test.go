@@ -38,6 +38,17 @@ func TestModel_NavigatesToNewProblem(t *testing.T) {
 	assert.Contains(t, nm.View(), "New Problem")
 }
 
+func TestModel_NewProblemKeyDoesNotTypeIntoForm(t *testing.T) {
+	m := New("unix:///nonexistent")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	nm := updated.(*Model)
+
+	assert.Nil(t, cmd)
+	assert.Equal(t, screenNewTask, nm.Screen)
+	assert.Empty(t, nm.newTask.ownerInput.Value())
+}
+
 func TestModel_NewProblemReceivesTextInput(t *testing.T) {
 	m := New("unix:///nonexistent")
 	m.Screen = screenNewTask
@@ -46,7 +57,27 @@ func TestModel_NewProblemReceivesTextInput(t *testing.T) {
 
 	nm := updated.(*Model)
 	assert.Equal(t, screenNewTask, nm.Screen)
-	assert.Equal(t, "n", nm.newTask.textarea.Value())
+	assert.Equal(t, "n", nm.newTask.ownerInput.Value())
+}
+
+func TestModel_EditProblemKeyOpensSelectedProblem(t *testing.T) {
+	m := New("unix:///nonexistent")
+	m.Loading = false
+	m.SortDesc = false
+	m.Problems = []api.ProblemResponse{
+		{ID: "p1", Description: "first"},
+		{ID: "p2", Description: "second"},
+	}
+	m.Cursor = 1
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	nm := updated.(*Model)
+
+	assert.Nil(t, cmd)
+	assert.Equal(t, screenNewTask, nm.Screen)
+	assert.Equal(t, formEdit, nm.newTask.mode)
+	assert.Equal(t, "p2", nm.newTask.problem.ID)
+	assert.Equal(t, "second", nm.newTask.description.Value())
 }
 
 func TestModel_WindowSizeResizesShell(t *testing.T) {
@@ -58,6 +89,7 @@ func TestModel_WindowSizeResizesShell(t *testing.T) {
 	nm := updated.(*Model)
 	assert.Equal(t, 120, nm.Width)
 	assert.Equal(t, 40, nm.Height)
-	assert.GreaterOrEqual(t, nm.newTask.textarea.Width(), 24)
-	assert.GreaterOrEqual(t, nm.newTask.textarea.Height(), 5)
+	assert.GreaterOrEqual(t, nm.newTask.ownerInput.Width, 24)
+	assert.GreaterOrEqual(t, nm.newTask.description.Width(), 24)
+	assert.GreaterOrEqual(t, nm.newTask.description.Height(), 5)
 }

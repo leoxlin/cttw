@@ -35,6 +35,10 @@ type CreateProblemRequest struct {
 	Description string `json:"description"`
 }
 
+type UpdateProblemRequest struct {
+	Description string `json:"description"`
+}
+
 type ProblemResponse struct {
 	ID          string         `json:"id"`
 	Description string         `json:"description"`

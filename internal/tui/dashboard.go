@@ -19,6 +19,9 @@ func dashboardView(m *Model, width int) string {
 		fmt.Sprintf("Sort: %s %s", sortLabel(m.Sort), sortDirection(m.SortDesc)),
 		"",
 	)
+	if m.Notice != "" {
+		lines = append(lines, helpStyle.Render(m.Notice), "")
+	}
 
 	if m.Loading {
 		lines = append(lines, mutedStyle.Render("Loading problems..."), "", dashboardKeys(m))
@@ -43,6 +46,7 @@ func dashboardView(m *Model, width int) string {
 	lines = append(lines,
 		sectionTitleStyle.Render("Workflows"),
 		"[n]   New problem     create work for a repository",
+		"[e]   Edit problem    update selected problem",
 		"[/]   Search          filter visible problems",
 		"[j/k] Select          move through problems",
 		"[enter] Details       open selected problem",
@@ -200,7 +204,7 @@ func dashboardKeys(m *Model) string {
 	if m.searching {
 		searchKey = "[enter] finish search"
 	}
-	return fmt.Sprintf("Keys: [n] new problem  %s  [ctrl+u] clear search  [j/k] select  [enter] details  [s] sort  [a] direction  [esc] refresh  [q] quit", searchKey)
+	return fmt.Sprintf("Keys: [n] new problem  [e] edit  %s  [ctrl+u] clear search  [j/k] select  [enter] details  [s] sort  [a] direction  [esc] refresh  [q] quit", searchKey)
 }
 
 func searchDisplay(m *Model) string {

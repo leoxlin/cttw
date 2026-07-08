@@ -144,6 +144,33 @@ func TestClient_CreateProblem(t *testing.T) {
 	assert.Equal(t, want, *got)
 }
 
+func TestClient_UpdateProblem(t *testing.T) {
+	want := ProblemResponse{
+		ID:          "p1",
+		Description: "updated",
+		Status:      "ready",
+		RepoID:      "r1",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/problems/p1", r.URL.Path)
+		assert.Equal(t, http.MethodPatch, r.Method)
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+		var req UpdateProblemRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "updated", req.Description)
+
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(want))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Listener.Addr().String())
+	got, err := client.UpdateProblem("p1", "updated")
+	require.NoError(t, err)
+	assert.Equal(t, want, *got)
+}
+
 func TestClient_ListProblems(t *testing.T) {
 	want := []ProblemResponse{
 		{ID: "p1", Description: "one", Status: "ready", RepoID: "r1", IssueNumber: 1},
