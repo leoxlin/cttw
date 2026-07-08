@@ -82,10 +82,10 @@ func dashboardView(m *Model, width int) string {
 			if len(p.Tasks) > 0 {
 				taskSummary = fmt.Sprintf("  %d tasks", len(p.Tasks))
 			}
-			line := fmt.Sprintf("%s %-8s  %-11s  %-6s  %-10s  %s%s",
+			line := fmt.Sprintf("%s %-8s  %s  %-6s  %-10s  %s%s",
 				marker,
 				strutil.ShortID(p.ID),
-				p.Status,
+				problemStatusLabel(p.Status),
 				issueLabel(p.IssueNumber),
 				dateLabel(p.UpdatedAt),
 				p.Description,
@@ -142,7 +142,7 @@ func taskSummary(tasks []api.TaskResponse) string {
 	}
 	lines := []string{fmt.Sprintf("Tasks (%d):", len(tasks))}
 	for _, t := range tasks {
-		line := fmt.Sprintf("  %s  %-12s  %s", strutil.ShortID(t.ID), t.Status, t.Title)
+		line := fmt.Sprintf("  %s  %s  %s", strutil.ShortID(t.ID), taskStatusLabel(t.Status), t.Title)
 		if t.IssueNumber > 0 {
 			line += fmt.Sprintf("  Issue: #%d", t.IssueNumber)
 		}

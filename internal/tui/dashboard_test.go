@@ -155,8 +155,10 @@ func TestDashboardViewHighlightsCursorAndShowsDetailAction(t *testing.T) {
 
 	view := dashboardView(m, 80)
 
-	assert.Contains(t, view, "  problem-  pending")
-	assert.Contains(t, view, "> problem-  ready")
+	assert.Contains(t, view, "  problem-")
+	assert.Contains(t, view, "pending")
+	assert.Contains(t, view, "> problem-")
+	assert.Contains(t, view, "ready")
 	assert.Contains(t, view, "[enter] details")
 }
 
