@@ -2,30 +2,29 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/llin/cttw/internal/strutil"
 )
 
-var titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-
-func dashboardView(m *Model) string {
-	s := titleStyle.Render("cttw — Claudivicus Take The Wheel") + "\n\n"
+func dashboardView(m *Model, width int) string {
+	var lines []string
+	lines = append(lines, sectionTitleStyle.Render("Problems"), "")
 	if m.Err != nil {
-		s += fmt.Sprintf("Error: %v\n\n", m.Err)
+		lines = append(lines, errorStyle.Render(fmt.Sprintf("Error: %v", m.Err)), "")
 	}
 	if len(m.Problems) == 0 {
-		s += "No problems yet.\n\n"
+		lines = append(lines, mutedStyle.Render("No problems yet."), "")
 	} else {
-		s += "Problems:\n"
+		lines = append(lines, helpStyle.Render("ID        Status       Description"))
 		for _, p := range m.Problems {
-			line := fmt.Sprintf("  %s  %-12s  %s", strutil.ShortID(p.ID), p.Status, p.Description)
-			s += truncate(line, 78) + "\n"
+			line := fmt.Sprintf("%-8s  %-11s  %s", strutil.ShortID(p.ID), p.Status, p.Description)
+			lines = append(lines, truncate(line, width))
 		}
-		s += "\n"
+		lines = append(lines, "")
 	}
-	s += "Keys: [n] new problem  [q] quit  [esc] refresh\n"
-	return s
+	lines = append(lines, helpStyle.Render("Keys: [n] new problem  [q] quit  [esc] refresh"))
+	return strings.Join(lines, "\n")
 }
 
 func truncate(s string, n int) string {
