@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -8,6 +9,157 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type stubProblemAPIClient struct {
+	listProblems []api.ProblemResponse
+	listErr      error
+	listCalls    int
+
+	getResponse *api.ProblemResponse
+	getErr      error
+	getCalls    int
+	gotID       string
+
+	createResponse     *api.ProblemResponse
+	createErr          error
+	createCalls        int
+	createdOwner       string
+	createdRepo        string
+	createdDescription string
+
+	updateResponse     *api.ProblemResponse
+	updateErr          error
+	updateCalls        int
+	updatedID          string
+	updatedDescription string
+}
+
+func (s *stubProblemAPIClient) ListProblems() ([]api.ProblemResponse, error) {
+	s.listCalls++
+	return s.listProblems, s.listErr
+}
+
+func (s *stubProblemAPIClient) GetProblem(id string) (*api.ProblemResponse, error) {
+	s.getCalls++
+	s.gotID = id
+	return s.getResponse, s.getErr
+}
+
+func (s *stubProblemAPIClient) CreateProblem(owner, repo, description string) (*api.ProblemResponse, error) {
+	s.createCalls++
+	s.createdOwner = owner
+	s.createdRepo = repo
+	s.createdDescription = description
+	return s.createResponse, s.createErr
+}
+
+func (s *stubProblemAPIClient) UpdateProblem(id, description string) (*api.ProblemResponse, error) {
+	s.updateCalls++
+	s.updatedID = id
+	s.updatedDescription = description
+	return s.updateResponse, s.updateErr
+}
+
+func stubProblemAPI(t *testing.T, client *stubProblemAPIClient) {
+	t.Helper()
+
+	original := newProblemAPIClient
+	newProblemAPIClient = func(string) problemAPIClient {
+		return client
+	}
+	t.Cleanup(func() {
+		newProblemAPIClient = original
+	})
+}
+
+func TestModel_InitLoadsProblemsFromAPI(t *testing.T) {
+	want := []api.ProblemResponse{
+		{ID: "problem-123456", Description: "wire dashboard data", Status: "ready", RepoID: "repo-1", IssueNumber: 7},
+		{ID: "problem-abcdef", Description: "handle error banners", Status: "failed", RepoID: "repo-2", IssueNumber: 8},
+	}
+	client := &stubProblemAPIClient{listProblems: want}
+	stubProblemAPI(t, client)
+
+	m := New("stub-socket")
+	msg := m.Init()()
+	require.IsType(t, problemsMsg{}, msg)
+
+	updated, cmd := m.Update(msg)
+	require.Nil(t, cmd)
+	got := updated.(*Model)
+
+	assert.NoError(t, got.Err)
+	assert.False(t, got.Loading)
+	assert.Equal(t, 1, client.listCalls)
+	assert.Equal(t, want, got.Problems)
+	assert.Contains(t, got.View(), "ready")
+	assert.Contains(t, got.View(), "wire dashboard data")
+}
+
+func TestModel_NavigatesToNewTaskAndEscRefreshesDashboard(t *testing.T) {
+	want := []api.ProblemResponse{{ID: "problem-123456", Description: "refreshed item", Status: "ready"}}
+	client := &stubProblemAPIClient{listProblems: want}
+	stubProblemAPI(t, client)
+
+	m := New("stub-socket")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	require.Nil(t, cmd)
+	got := updated.(*Model)
+	require.Equal(t, screenNewTask, got.Screen)
+	assert.Empty(t, got.newTask.ownerInput.Value())
+	assert.Contains(t, got.View(), "New Problem")
+
+	updated, cmd = got.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	require.NotNil(t, cmd)
+	got = updated.(*Model)
+	assert.Equal(t, screenDashboard, got.Screen)
+
+	msg := cmd()
+	require.IsType(t, problemsMsg{}, msg)
+	updated, cmd = got.Update(msg)
+	require.Nil(t, cmd)
+	got = updated.(*Model)
+
+	assert.Equal(t, 1, client.listCalls)
+	assert.Equal(t, want, got.Problems)
+	assert.Contains(t, got.View(), "refreshed item")
+}
+
+func TestModel_SwitchToDashboardRefreshesProblemsAfterSubmit(t *testing.T) {
+	want := []api.ProblemResponse{{ID: "problem-123456", Description: "created from form", Status: "pending"}}
+	client := &stubProblemAPIClient{listProblems: want}
+	stubProblemAPI(t, client)
+
+	m := New("stub-socket")
+	m.Screen = screenNewTask
+
+	updated, cmd := m.Update(switchToDashboardMsg{notice: "Problem created."})
+	require.NotNil(t, cmd)
+	got := updated.(*Model)
+	assert.Equal(t, screenDashboard, got.Screen)
+	assert.Equal(t, "Problem created.", got.Notice)
+
+	msg := cmd()
+	require.IsType(t, problemsMsg{}, msg)
+	updated, cmd = got.Update(msg)
+	require.Nil(t, cmd)
+	got = updated.(*Model)
+
+	assert.Equal(t, want, got.Problems)
+	assert.Contains(t, got.View(), "created from form")
+}
+
+func TestModel_DashboardShowsLoadingAndErrorStates(t *testing.T) {
+	m := New("unix:///nonexistent")
+
+	assert.Contains(t, m.View(), "Loading problems...")
+
+	m.Loading = false
+	m.Err = errors.New("daemon offline")
+	view := m.View()
+	assert.Contains(t, view, "Error: daemon offline")
+	assert.Contains(t, view, "No problems yet.")
+}
 
 func TestModel_ShellRendersDashboardNavigation(t *testing.T) {
 	m := New("unix:///nonexistent")

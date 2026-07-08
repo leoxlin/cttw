@@ -235,7 +235,7 @@ type problemFormValue struct {
 
 func (n newTaskModel) submit(value problemFormValue) tea.Cmd {
 	return func() tea.Msg {
-		client := api.NewClient(n.socket)
+		client := newProblemAPIClient(n.socket)
 		if n.mode == formEdit {
 			_, err := client.UpdateProblem(value.id, value.description)
 			return submitProblemMsg{err: err}
