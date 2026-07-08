@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/llin/cttw/internal/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,6 +20,23 @@ func TestDashboardView_LoadingState(t *testing.T) {
 
 	assert.Contains(t, view, "Loading problems...")
 	assert.NotContains(t, view, "No problems yet.")
+}
+
+func TestDashboardView_RespectsNarrowWidth(t *testing.T) {
+	m := New("unix:///nonexistent")
+	m.Loading = false
+	m.Problems = []api.ProblemResponse{
+		{
+			ID:          "1234567890abcdef",
+			Status:      "in_progress",
+			Description: "implement a very long responsive terminal layout",
+		},
+	}
+
+	view := dashboardView(m, 32)
+
+	assertMaxLineWidth(t, view, 32)
+	assert.Contains(t, view, "Keys:")
 }
 
 func TestDashboardViewSummarizesProjectDataAndWorkflows(t *testing.T) {
@@ -246,6 +264,13 @@ func TestDetailViewEmptyState(t *testing.T) {
 
 	assert.Contains(t, view, "No problem selected.")
 	assert.Contains(t, view, "Actions: [b/esc] back  [q] quit")
+}
+
+func assertMaxLineWidth(t *testing.T, view string, width int) {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSuffix(view, "\n"), "\n") {
+		assert.LessOrEqual(t, lipgloss.Width(line), width, line)
+	}
 }
 
 func problem(id, status, description string, days int) api.ProblemResponse {

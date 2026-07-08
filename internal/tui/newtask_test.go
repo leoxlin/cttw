@@ -60,6 +60,17 @@ func TestNewTask_DoneView(t *testing.T) {
 	assert.Contains(t, m.View(), "Problem created")
 }
 
+func TestNewTask_ResizesForNarrowWidth(t *testing.T) {
+	m := newNewTask("unix:///nonexistent")
+	m.SetSize(32, 12)
+
+	assert.Equal(t, 32, m.ownerInput.Width)
+	assert.Equal(t, 32, m.repoInput.Width)
+	assert.GreaterOrEqual(t, m.description.Width(), 24)
+	assert.LessOrEqual(t, m.description.Width(), 32)
+	assert.Equal(t, 5, m.description.Height())
+}
+
 func TestNewTask_EditSubmitValidationError(t *testing.T) {
 	m := newEditTask("unix:///nonexistent", api.ProblemResponse{ID: "p1", Description: "old"})
 	m.description.SetValue(" ")

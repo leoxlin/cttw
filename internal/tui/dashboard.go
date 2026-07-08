@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/llin/cttw/internal/api"
 	"github.com/llin/cttw/internal/strutil"
 )
@@ -24,8 +25,8 @@ func dashboardView(m *Model, width int) string {
 	}
 
 	if m.Loading {
-		lines = append(lines, mutedStyle.Render("Loading problems..."), "", dashboardKeys(m))
-		return strings.Join(lines, "\n")
+		lines = append(lines, mutedStyle.Render("Loading problems..."), "", helpStyle.Render(dashboardKeysForWidth(m, width)))
+		return strings.Join(truncateLines(lines, width), "\n")
 	}
 
 	if m.Err != nil {
@@ -94,8 +95,8 @@ func dashboardView(m *Model, width int) string {
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, helpStyle.Render(dashboardKeys(m)))
-	return strings.Join(lines, "\n")
+	lines = append(lines, helpStyle.Render(dashboardKeysForWidth(m, width)))
+	return strings.Join(truncateLines(lines, width), "\n")
 }
 
 func detailView(m *Model) string {
@@ -205,6 +206,24 @@ func dashboardKeys(m *Model) string {
 		searchKey = "[enter] finish search"
 	}
 	return fmt.Sprintf("Keys: [n] new problem  [e] edit  %s  [ctrl+u] clear search  [j/k] select  [enter] details  [s] sort  [a] direction  [esc] refresh  [q] quit", searchKey)
+}
+
+func dashboardKeysForWidth(m *Model, width int) string {
+	if width >= 46 {
+		return dashboardKeys(m)
+	}
+	searchKey := "[/] search"
+	if m.searching {
+		searchKey = "[enter] done"
+	}
+	return strings.Join([]string{
+		"Keys:",
+		"  [n] new  [e] edit",
+		"  " + searchKey,
+		"  [j/k] select",
+		"  [enter] details",
+		"  [q] quit  [esc] refresh",
+	}, "\n")
 }
 
 func searchDisplay(m *Model) string {
@@ -334,12 +353,39 @@ func indentLines(s, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
+func truncateLines(lines []string, width int) []string {
+	if width >= 46 {
+		return lines
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		parts := strings.Split(line, "\n")
+		for _, part := range parts {
+			out = append(out, truncate(part, width))
+		}
+	}
+	return out
+}
+
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= n {
 		return s
 	}
-	if n <= 3 {
-		return s[:n]
+	const tail = "..."
+	if n <= len(tail) {
+		return strings.Repeat(".", n)
 	}
-	return s[:n-3] + "..."
+	limit := n - len(tail)
+	var b strings.Builder
+	for _, r := range s {
+		next := b.String() + string(r)
+		if lipgloss.Width(next) > limit {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String() + tail
 }
