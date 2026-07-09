@@ -17,6 +17,9 @@ type PullRequest struct {
 	Head   struct {
 		Ref string `json:"ref"`
 	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
 }
 
 // Client provides GitHub API operations needed by cttw.
@@ -26,6 +29,8 @@ type Client interface {
 	CreateBranch(ctx context.Context, owner, repo, branch, base string) error
 	CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error)
 	GetPullRequest(ctx context.Context, owner, repo string, number int) (*PullRequest, error)
+	ListPullRequests(ctx context.Context, owner, repo, head, base string) ([]PullRequest, error)
+	UpdatePullRequest(ctx context.Context, owner, repo string, number int, title, body, base string) error
 }
 
 type client struct {
@@ -162,6 +167,35 @@ func (c *client) GetPullRequest(ctx context.Context, owner, repo string, number 
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (c *client) ListPullRequests(ctx context.Context, owner, repo, head, base string) ([]PullRequest, error) {
+	q := url.Values{}
+	q.Set("state", "open")
+	if head != "" {
+		q.Set("head", owner+":"+head)
+	}
+	if base != "" {
+		q.Set("base", base)
+	}
+	path := repoPath(owner, repo, "/pulls") + "?" + q.Encode()
+	var out []PullRequest
+	if _, err := c.do(ctx, "GET", path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+type updatePRRequest struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+	Base  string `json:"base"`
+}
+
+func (c *client) UpdatePullRequest(ctx context.Context, owner, repo string, number int, title, body, base string) error {
+	path := repoPath(owner, repo, fmt.Sprintf("/pulls/%d", number))
+	_, err := c.do(ctx, "PATCH", path, updatePRRequest{Title: title, Body: body, Base: base}, nil)
+	return err
 }
 
 func repoPath(owner, repo, suffix string) string {

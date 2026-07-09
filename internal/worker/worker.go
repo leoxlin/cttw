@@ -15,6 +15,7 @@ import (
 	"github.com/llin/cttw/internal/jsonutil"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
+	"github.com/llin/cttw/internal/stack"
 	"github.com/llin/cttw/internal/store"
 	"github.com/llin/cttw/internal/strutil"
 )
@@ -32,13 +33,12 @@ type gitRunner interface {
 
 type gitRunnerFactory func(dir, token string) gitRunner
 
-// StackRunner abstracts the gh stack CLI operations used by the worker.
+// StackRunner abstracts the native stacked PR publisher used by the worker.
 type StackRunner interface {
-	StackInit(base string, branches []string) error
-	StackSubmit(auto, open bool) error
+	Submit(ctx context.Context, groups []stack.Group) error
 }
 
-type stackRunnerFactory func(dir string) StackRunner
+type stackRunnerFactory func(dir, owner, name, token string) StackRunner
 
 type Option func(*Worker)
 
@@ -71,8 +71,13 @@ func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, g
 		newGitRunner: func(dir, token string) gitRunner {
 			return &gitexec.Runner{Dir: dir, Token: token}
 		},
-		newStackRunner: func(dir string) StackRunner {
-			return &gitexec.StackRunner{Dir: dir}
+		newStackRunner: func(dir, owner, name, token string) StackRunner {
+			return &stack.Runner{
+				Git:    &gitexec.Runner{Dir: dir, Token: token},
+				GitHub: gh,
+				Owner:  owner,
+				Name:   name,
+			}
 		},
 	}
 	for _, opt := range opts {
@@ -97,7 +102,7 @@ func withGitRunnerFactory(factory gitRunnerFactory) Option {
 	}
 }
 
-func WithStackRunnerFactory(factory func(dir string) StackRunner) Option {
+func WithStackRunnerFactory(factory func(dir, owner, name, token string) StackRunner) Option {
 	return func(w *Worker) {
 		if factory != nil {
 			w.newStackRunner = factory
@@ -211,7 +216,7 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	}
 
 	git := w.newGitRunner(r.LocalDir, w.gitHubToken)
-	stack := w.newStackRunner(r.LocalDir)
+	sr := w.newStackRunner(r.LocalDir, r.Owner, r.Name, w.gitHubToken)
 
 	branch := group.Branch
 	if branch == "" {
@@ -276,7 +281,7 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 		return fmt.Errorf("check problem completion: %w", err)
 	}
 	if problemComplete {
-		if err := w.submitStack(ctx, stack, r, problem); err != nil {
+		if err := w.submitStack(ctx, sr, r, problem); err != nil {
 			return fmt.Errorf("submit stack: %w", err)
 		}
 	}
@@ -313,7 +318,7 @@ func (w *Worker) isProblemComplete(ctx context.Context, problemID string) (bool,
 	return n == 0, nil
 }
 
-func (w *Worker) submitStack(ctx context.Context, stack StackRunner, r *store.Repo, problem *store.Problem) error {
+func (w *Worker) submitStack(ctx context.Context, sr StackRunner, r *store.Repo, problem *store.Problem) error {
 	groups, err := w.store.ListPRGroupsByProblem(ctx, problem.ID)
 	if err != nil {
 		return fmt.Errorf("list groups: %w", err)
@@ -321,22 +326,39 @@ func (w *Worker) submitStack(ctx context.Context, stack StackRunner, r *store.Re
 	if len(groups) == 0 {
 		return nil
 	}
-	branches := make([]string, 0, len(groups))
+	stackGroups := make([]stack.Group, 0, len(groups))
 	for _, g := range groups {
 		if g.Branch == "" {
 			return fmt.Errorf("group %s has no branch", g.ID)
 		}
-		branches = append(branches, g.Branch)
+		base := g.BaseBranch
+		if base == "" {
+			base = r.DefaultBranch
+		}
+		stackGroups = append(stackGroups, stack.Group{
+			ID:          g.ID,
+			Title:       g.Title,
+			Description: g.Description,
+			Branch:      g.Branch,
+			BaseBranch:  base,
+			PRNumber:    g.PRNumber,
+		})
 	}
-	base := groups[0].BaseBranch
-	if base == "" {
-		base = r.DefaultBranch
+	if err := sr.Submit(ctx, stackGroups); err != nil {
+		return fmt.Errorf("submit stack: %w", err)
 	}
-	if err := stack.StackInit(base, branches); err != nil {
-		return fmt.Errorf("gh stack init: %w", err)
-	}
-	if err := stack.StackSubmit(true, true); err != nil {
-		return fmt.Errorf("gh stack submit: %w", err)
+	// Persist the PR numbers assigned by the stack runner.
+	for i, sg := range stackGroups {
+		if sg.PRNumber == 0 {
+			continue
+		}
+		g := &groups[i]
+		if g.PRNumber != sg.PRNumber {
+			g.PRNumber = sg.PRNumber
+			if err := w.store.UpdatePRGroup(ctx, g); err != nil {
+				return fmt.Errorf("update group pr number: %w", err)
+			}
+		}
 	}
 	return nil
 }

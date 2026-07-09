@@ -44,6 +44,12 @@ func (m *mockGitHub) CreatePullRequest(ctx context.Context, owner, repo, title, 
 func (m *mockGitHub) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
 	return nil, nil
 }
+func (m *mockGitHub) ListPullRequests(ctx context.Context, owner, repo, head, base string) ([]github.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockGitHub) UpdatePullRequest(ctx context.Context, owner, repo string, number int, title, body, base string) error {
+	return nil
+}
 
 type mockRepoRegistry struct {
 	dir string

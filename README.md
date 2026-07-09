@@ -4,16 +4,9 @@
 
 A TUI CLI + daemon that coordinates ACP agents to break user problems into
 feature-complete PR groups, tracks them via GitHub issues/sub-issues, and opens
-stacked PRs using `gh stack`.
+stacked PRs natively.
 
 ## Quick Start
-
-`cttw` uses the GitHub CLI (`gh`) and the `gh-stack` extension to create and
-submit stacked pull requests. Install them first:
-
-```bash
-gh extension install github/gh-stack
-```
 
 ```bash
 export GITHUB_TOKEN=...   # optional if `gh auth token` is available
@@ -63,7 +56,7 @@ You can also point to a custom config file with `CTTW_CONFIG=/path/to/config.tom
 
 - **Daemon** persists state in SQLite, registers repos, exposes a Unix-socket HTTP API, and polls for pending tasks.
 - **Coordinator** launches an ACP agent per problem to decompose it into a small number of feature-complete PR groups. Each group becomes one branch/PR and may contain multiple tasks that are committed together. It creates a parent GitHub issue for the problem and child issues for each group.
-- **Worker** launches an ACP agent per task to edit and validate code, while cttw owns branch creation, commits, rollback, push, and PR submission. Tasks within a group are executed serially on the group's branch; groups stack on top of each other. When all groups for a problem are complete, `cttw` uses `gh stack` to submit the stack of PRs. Agents return structured JSON describing the result; cttw commits successful diffs and resets failed or no-op diffs.
+- **Worker** launches an ACP agent per task to edit and validate code, while cttw owns branch creation, commits, rollback, push, and PR submission. Tasks within a group are executed serially on the group's branch; groups stack on top of each other. When all groups for a problem are complete, cttw force-pushes the group branches and creates or updates the stack of PRs directly via the GitHub API, with each PR targeting the previous group's branch. Agents return structured JSON describing the result; cttw commits successful diffs and resets failed or no-op diffs.
 - **CLI/TUI** talk to the daemon over the Unix socket.
 
 cttw does not hold LLM API keys; agents are external processes that implement the [Agent Client Protocol](https://agentclientprotocol.com).

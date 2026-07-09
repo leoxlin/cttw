@@ -113,6 +113,45 @@ func TestGetPullRequest_NotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "404")
 }
 
+func TestListPullRequests(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/repos/o/r/pulls", r.URL.Path)
+		q := r.URL.Query()
+		assert.Equal(t, "open", q.Get("state"))
+		assert.Equal(t, "o:feat/x", q.Get("head"))
+		assert.Equal(t, "main", q.Get("base"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`[{"number":7,"head":{"ref":"feat/x"},"base":{"ref":"main"}}]`))
+	}))
+	defer ts.Close()
+
+	c := newWithURL("gh_token", ts.URL, ts.Client())
+	prs, err := c.ListPullRequests(context.Background(), "o", "r", "feat/x", "main")
+	require.NoError(t, err)
+	require.Len(t, prs, 1)
+	assert.Equal(t, 7, prs[0].Number)
+	assert.Equal(t, "feat/x", prs[0].Head.Ref)
+	assert.Equal(t, "main", prs[0].Base.Ref)
+}
+
+func TestUpdatePullRequest(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/repos/o/r/pulls/7", r.URL.Path)
+		assert.Equal(t, "PATCH", r.Method)
+		body, _ := io.ReadAll(r.Body)
+		assert.JSONEq(t, `{"title":"new title","body":"new body","base":"main"}`, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"number":7}`))
+	}))
+	defer ts.Close()
+
+	c := newWithURL("gh_token", ts.URL, ts.Client())
+	err := c.UpdatePullRequest(context.Background(), "o", "r", 7, "new title", "new body", "main")
+	require.NoError(t, err)
+}
+
 func TestNew_DefaultTimeout(t *testing.T) {
 	c := New("token", nil)
 	require.NotNil(t, c)

@@ -153,35 +153,13 @@ func (r *Runner) Push(branch string) error {
 	return r.run("push", "origin", branch)
 }
 
-// StackRunner shells out to the gh stack CLI extension.
-type StackRunner struct {
-	Dir string
-}
-
-// StackInit initializes a stack with the given base and ordered branches.
-func (s *StackRunner) StackInit(base string, branches []string) error {
-	args := []string{"stack", "init", "--base", base}
-	args = append(args, branches...)
-	return s.run(args...)
-}
-
-// StackSubmit pushes branches and creates/updates stacked PRs.
-// Auto generates titles; open creates ready-for-review PRs.
-func (s *StackRunner) StackSubmit(auto, open bool) error {
-	args := []string{"stack", "submit"}
-	if auto {
-		args = append(args, "--auto")
+// PushForce force-pushes the branch to origin, using --force-with-lease when
+// supported and falling back to --force for remotes that do not implement the
+// lease protocol. This matches the behavior of stacked PR tools that rewrite
+// local history before publishing.
+func (r *Runner) PushForce(branch string) error {
+	if err := r.run("push", "--force-with-lease", "origin", branch); err != nil {
+		return r.run("push", "--force", "origin", branch)
 	}
-	if open {
-		args = append(args, "--open")
-	}
-	return s.run(args...)
-}
-
-func (s *StackRunner) run(args ...string) error {
-	cmd := exec.Command("gh", args...)
-	cmd.Dir = s.Dir
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run()
+	return nil
 }

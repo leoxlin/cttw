@@ -140,3 +140,28 @@ func TestRunner_CurrentBranchAndHead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, head, 40)
 }
+
+func TestRunner_PushForce(t *testing.T) {
+	root := t.TempDir()
+	bare := filepath.Join(root, "origin.git")
+	work := filepath.Join(root, "repo")
+
+	require.NoError(t, exec.Command("git", "init", "--bare", bare).Run())
+	require.NoError(t, exec.Command("git", "clone", bare, work).Run())
+	require.NoError(t, exec.Command("git", "-C", work, "config", "user.email", "t@t").Run())
+	require.NoError(t, exec.Command("git", "-C", work, "config", "user.name", "T").Run())
+	require.NoError(t, exec.Command("git", "-C", work, "commit", "--allow-empty", "-m", "init").Run())
+	require.NoError(t, exec.Command("git", "-C", work, "push", "-u", "origin", "main").Run())
+
+	r := &Runner{Dir: work}
+	require.NoError(t, r.CheckoutNew("feat/x", "main"))
+	require.NoError(t, os.WriteFile(filepath.Join(work, "feat.txt"), []byte("feature"), 0644))
+	committed, err := r.CommitAll("feature commit")
+	require.NoError(t, err)
+	require.True(t, committed)
+	require.NoError(t, r.PushForce("feat/x"))
+
+	out, err := exec.Command("git", "-C", bare, "rev-parse", "refs/heads/feat/x").Output()
+	require.NoError(t, err)
+	assert.NotEmpty(t, strings.TrimSpace(string(out)))
+}

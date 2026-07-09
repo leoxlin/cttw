@@ -17,6 +17,7 @@ import (
 	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
+	"github.com/llin/cttw/internal/stack"
 	"github.com/llin/cttw/internal/store"
 	"github.com/llin/cttw/internal/worker"
 	"github.com/stretchr/testify/assert"
@@ -45,11 +46,16 @@ func (m *mockGH) CreatePullRequest(ctx context.Context, owner, repo, title, body
 func (m *mockGH) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
 	return nil, nil
 }
+func (m *mockGH) ListPullRequests(ctx context.Context, owner, repo, head, base string) ([]github.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockGH) UpdatePullRequest(ctx context.Context, owner, repo string, number int, title, body, base string) error {
+	return nil
+}
 
 type noopStackRunner struct{}
 
-func (n *noopStackRunner) StackInit(base string, branches []string) error { return nil }
-func (n *noopStackRunner) StackSubmit(auto, open bool) error              { return nil }
+func (n *noopStackRunner) Submit(ctx context.Context, groups []stack.Group) error { return nil }
 
 type mockRegistry struct {
 	dir string
@@ -116,7 +122,7 @@ func TestServer_ShutdownWaitsForWorkerLoop(t *testing.T) {
 	}
 
 	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute,
-		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
+		worker.WithStackRunnerFactory(func(dir, owner, name, token string) worker.StackRunner { return &noopStackRunner{} }))
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -175,7 +181,7 @@ func TestServer_CreateProblem_AcceptsAsync(t *testing.T) {
 	regRoot := filepath.Join(t.TempDir(), "repos")
 	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
 	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute,
-		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
+		worker.WithStackRunnerFactory(func(dir, owner, name, token string) worker.StackRunner { return &noopStackRunner{} }))
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -233,7 +239,7 @@ func TestServer_CreateProblem_LazyRegistersRepo(t *testing.T) {
 	reg := &mockRegistry{dir: initDaemonGitRepo(t)}
 	coord := coordinator.New(s, ml, reg, gh, "codex", time.Minute, coordinator.WithToken("tok"))
 	w := worker.New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute,
-		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
+		worker.WithStackRunnerFactory(func(dir, owner, name, token string) worker.StackRunner { return &noopStackRunner{} }))
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -363,7 +369,7 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	regRoot := filepath.Join(t.TempDir(), "repos")
 	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
 	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute,
-		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
+		worker.WithStackRunnerFactory(func(dir, owner, name, token string) worker.StackRunner { return &noopStackRunner{} }))
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -462,7 +468,7 @@ func TestServer_UpdateProblem(t *testing.T) {
 		Store:       s,
 		Coordinator: coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute),
 		Worker:      worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute,
-			worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} })),
+			worker.WithStackRunnerFactory(func(dir, owner, name, token string) worker.StackRunner { return &noopStackRunner{} })),
 		Socket:      "unix://" + sockFile,
 		shutdown:    make(chan struct{}),
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
+	"github.com/llin/cttw/internal/stack"
 	"github.com/llin/cttw/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,20 +42,21 @@ func (m *mockGH) GetPullRequest(ctx context.Context, owner, repo string, number 
 	return &github.PullRequest{Number: number}, nil
 }
 
+func (m *mockGH) ListPullRequests(ctx context.Context, owner, repo, head, base string) ([]github.PullRequest, error) {
+	return nil, nil
+}
+
+func (m *mockGH) UpdatePullRequest(ctx context.Context, owner, repo string, number int, title, body, base string) error {
+	return nil
+}
+
 type mockStack struct {
-	initCalls   [][]string
-	initError   error
-	submitCalls []struct{ Auto, Open bool }
+	submitCalls [][]stack.Group
 	submitError error
 }
 
-func (m *mockStack) StackInit(base string, branches []string) error {
-	m.initCalls = append(m.initCalls, append([]string{base}, branches...))
-	return m.initError
-}
-
-func (m *mockStack) StackSubmit(auto, open bool) error {
-	m.submitCalls = append(m.submitCalls, struct{ Auto, Open bool }{Auto: auto, Open: open})
+func (m *mockStack) Submit(ctx context.Context, groups []stack.Group) error {
+	m.submitCalls = append(m.submitCalls, groups)
 	return m.submitError
 }
 
@@ -185,7 +187,7 @@ func TestWorker_ExecuteTask_ManagedLifecycleCommitsPushesAndSubmitsStack(t *test
 
 	ms := &mockStack{}
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return ms }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return ms }),
 	)
 	require.NoError(t, w.ExecuteTask(ctx, task))
 
@@ -205,12 +207,11 @@ func TestWorker_ExecuteTask_ManagedLifecycleCommitsPushesAndSubmitsStack(t *test
 	assert.Contains(t, runGit(t, dir, "branch", "-r"), "origin/"+branch)
 	assert.Empty(t, gitStatus(t, dir))
 
-	require.Len(t, ms.initCalls, 1)
-	assert.Equal(t, "main", ms.initCalls[0][0])
-	assert.Equal(t, branch, ms.initCalls[0][1])
 	require.Len(t, ms.submitCalls, 1)
-	assert.True(t, ms.submitCalls[0].Auto)
-	assert.True(t, ms.submitCalls[0].Open)
+	require.Len(t, ms.submitCalls[0], 1)
+	assert.Equal(t, branch, ms.submitCalls[0][0].Branch)
+	assert.Equal(t, "main", ms.submitCalls[0][0].BaseBranch)
+	assert.Equal(t, "add handler", ms.submitCalls[0][0].Title)
 }
 
 func TestWorker_ExecuteTask_ManagedLifecycleUsesGitHubTokenForRunner(t *testing.T) {
@@ -249,7 +250,7 @@ func TestWorker_ExecuteTask_ManagedLifecycleUsesGitHubTokenForRunner(t *testing.
 			gotToken = token
 			return &gitexec.Runner{Dir: dir, Token: token}
 		}),
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 
 	require.NoError(t, w.ExecuteTask(ctx, task))
@@ -280,7 +281,7 @@ func TestWorker_ExecuteTask_ResetsOnAgentFailure(t *testing.T) {
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
@@ -312,7 +313,7 @@ func TestWorker_ExecuteTask_ResetsPromptErrorAfterEdits(t *testing.T) {
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
@@ -345,7 +346,7 @@ func TestWorker_ExecuteTask_ResetsMalformedJSONAfterEdits(t *testing.T) {
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
@@ -378,7 +379,7 @@ func TestWorker_ExecuteTask_CompletesWithRealDiffDespiteEmptyKeyChanges(t *testi
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	require.NoError(t, w.ExecuteTask(ctx, task))
 
@@ -410,7 +411,7 @@ func TestWorker_ExecuteTask_ResetsWhenCompletedTaskProducesNoDiff(t *testing.T) 
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
@@ -447,7 +448,7 @@ func TestWorker_ExecuteTask_PreservesWorkspaceOnCommitFailure(t *testing.T) {
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
@@ -490,7 +491,7 @@ func TestWorker_ExecuteTask_FailsNewTaskWhenOtherBranchIsDirty(t *testing.T) {
 	require.NoError(t, s.UpdateTask(ctx, taskB))
 
 	w := New(s, &launcher.MockLauncher{}, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	err = w.RunOnce(ctx)
 	require.Error(t, err)
@@ -535,7 +536,7 @@ func TestWorker_RunOnce_PreservesCommitFailureAsFailed(t *testing.T) {
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	err = w.RunOnce(ctx)
 	require.Error(t, err)
@@ -583,7 +584,7 @@ func TestWorker_RunOnceForRepo_PreservesCommitFailureAsFailed(t *testing.T) {
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	err = w.RunOnceForRepo(ctx, r.ID)
 	require.Error(t, err)
@@ -621,7 +622,7 @@ func TestWorker_RunOnce_AttemptCountAfterFailure(t *testing.T) {
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 
 	require.Error(t, w.RunOnce(ctx))
@@ -665,7 +666,7 @@ func TestWorker_RunOnce_ReturnsUpdateError(t *testing.T) {
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	err = w.RunOnce(ctx)
 	require.Error(t, err)
@@ -696,7 +697,7 @@ func TestWorker_RunOnce_CompletedWithoutDiffFailsTask(t *testing.T) {
 	}
 
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 	require.Error(t, w.RunOnce(ctx))
 
@@ -730,7 +731,7 @@ func TestWorker_RunOnceForRepo(t *testing.T) {
 		}, nil
 	}
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return &mockStack{} }),
 	)
 
 	require.NoError(t, w.RunOnceForRepo(ctx, r2.ID))
@@ -786,7 +787,7 @@ func TestWorker_GroupsStackCommitsAndWaitsForPreviousGroup(t *testing.T) {
 
 	ms := &mockStack{}
 	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
-		withStackRunnerFactory(func(dir string) StackRunner { return ms }),
+		withStackRunnerFactory(func(dir, owner, name, token string) StackRunner { return ms }),
 	)
 
 	// First run: task1 commits to group1 branch, group1 stays incomplete.
@@ -827,13 +828,14 @@ func TestWorker_GroupsStackCommitsAndWaitsForPreviousGroup(t *testing.T) {
 	assert.Contains(t, runGit(t, dir, "branch", "-r"), "origin/"+branch2)
 
 	// Both group branches were initialized and the stack was submitted.
-	require.Len(t, ms.initCalls, 1)
-	assert.Equal(t, "main", ms.initCalls[0][0])
-	assert.Equal(t, branch1, ms.initCalls[0][1])
-	assert.Equal(t, branch2, ms.initCalls[0][2])
 	require.Len(t, ms.submitCalls, 1)
-	assert.True(t, ms.submitCalls[0].Auto)
-	assert.True(t, ms.submitCalls[0].Open)
+	require.Len(t, ms.submitCalls[0], 2)
+	assert.Equal(t, branch1, ms.submitCalls[0][0].Branch)
+	assert.Equal(t, "main", ms.submitCalls[0][0].BaseBranch)
+	assert.Equal(t, "group one", ms.submitCalls[0][0].Title)
+	assert.Equal(t, branch2, ms.submitCalls[0][1].Branch)
+	assert.Equal(t, branch1, ms.submitCalls[0][1].BaseBranch)
+	assert.Equal(t, "group two", ms.submitCalls[0][1].Title)
 
 	// Verify group1 has two commits from the two tasks.
 	logOut := runGit(t, dir, "log", "--pretty=%s", branch1)

@@ -14,6 +14,7 @@ import (
 	"github.com/llin/cttw/internal/github"
 	"github.com/llin/cttw/internal/launcher"
 	"github.com/llin/cttw/internal/repo"
+	"github.com/llin/cttw/internal/stack"
 	"github.com/llin/cttw/internal/store"
 	"github.com/llin/cttw/internal/worker"
 	"github.com/stretchr/testify/assert"
@@ -22,8 +23,7 @@ import (
 
 type noopStackRunner struct{}
 
-func (n *noopStackRunner) StackInit(base string, branches []string) error { return nil }
-func (n *noopStackRunner) StackSubmit(auto, open bool) error              { return nil }
+func (n *noopStackRunner) Submit(ctx context.Context, groups []stack.Group) error { return nil }
 
 type smokeGH struct {
 	issueCount int
@@ -48,6 +48,12 @@ func (s *smokeGH) GetPullRequest(ctx context.Context, owner, repo string, number
 	return &github.PullRequest{Number: number, Head: struct {
 		Ref string `json:"ref"`
 	}{Ref: s.prHead}}, nil
+}
+func (s *smokeGH) ListPullRequests(ctx context.Context, owner, repo, head, base string) ([]github.PullRequest, error) {
+	return nil, nil
+}
+func (s *smokeGH) UpdatePullRequest(ctx context.Context, owner, repo string, number int, title, body, base string) error {
+	return nil
 }
 
 func TestIntegration_FakeACPAgent(t *testing.T) {
@@ -78,7 +84,7 @@ func TestIntegration_FakeACPAgent(t *testing.T) {
 	gh := &smokeGH{}
 	coord := coordinator.New(s, ln, reg, gh, "codex", time.Minute)
 	w := worker.New(s, ln, reg, gh, "codex", time.Minute,
-		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
+		worker.WithStackRunnerFactory(func(dir, owner, name, token string) worker.StackRunner { return &noopStackRunner{} }))
 
 	problem, err := coord.CreateProblem(ctx, "o", "r", "add smoke test")
 	require.NoError(t, err)
