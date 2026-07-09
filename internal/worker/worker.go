@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -33,17 +32,26 @@ type gitRunner interface {
 
 type gitRunnerFactory func(dir, token string) gitRunner
 
+// StackRunner abstracts the gh stack CLI operations used by the worker.
+type StackRunner interface {
+	StackInit(base string, branches []string) error
+	StackSubmit(auto, open bool) error
+}
+
+type stackRunnerFactory func(dir string) StackRunner
+
 type Option func(*Worker)
 
 type Worker struct {
-	store         *store.Store
-	launcher      launcher.Launcher
-	repos         *repo.Registry
-	gh            github.Client
-	backend       string
-	promptTimeout time.Duration
-	gitHubToken   string
-	newGitRunner  gitRunnerFactory
+	store            *store.Store
+	launcher         launcher.Launcher
+	repos            *repo.Registry
+	gh               github.Client
+	backend          string
+	promptTimeout    time.Duration
+	gitHubToken      string
+	newGitRunner     gitRunnerFactory
+	newStackRunner   stackRunnerFactory
 }
 
 func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, gh github.Client, backend string, promptTimeout time.Duration, opts ...Option) *Worker {
@@ -62,6 +70,9 @@ func New(store *store.Store, launcher launcher.Launcher, repos *repo.Registry, g
 		promptTimeout: promptTimeout,
 		newGitRunner: func(dir, token string) gitRunner {
 			return &gitexec.Runner{Dir: dir, Token: token}
+		},
+		newStackRunner: func(dir string) StackRunner {
+			return &gitexec.StackRunner{Dir: dir}
 		},
 	}
 	for _, opt := range opts {
@@ -82,6 +93,22 @@ func withGitRunnerFactory(factory gitRunnerFactory) Option {
 	return func(w *Worker) {
 		if factory != nil {
 			w.newGitRunner = factory
+		}
+	}
+}
+
+func WithStackRunnerFactory(factory func(dir string) StackRunner) Option {
+	return func(w *Worker) {
+		if factory != nil {
+			w.newStackRunner = factory
+		}
+	}
+}
+
+func withStackRunnerFactory(factory stackRunnerFactory) Option {
+	return func(w *Worker) {
+		if factory != nil {
+			w.newStackRunner = factory
 		}
 	}
 }
@@ -178,20 +205,43 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 		return fmt.Errorf("get problem: %w", err)
 	}
 
-	git := w.newGitRunner(r.LocalDir, w.gitHubToken)
-	branch := task.Branch
-	if branch == "" {
-		branch = taskBranchName(task)
-		task.Branch = branch
+	group, err := w.store.GetPRGroup(ctx, task.PRGroupID)
+	if err != nil {
+		return fmt.Errorf("get pr group: %w", err)
 	}
-	task.BaseBranch = r.DefaultBranch
-	if err := ensureTaskBranch(task, git, branch, r.DefaultBranch); err != nil {
+
+	git := w.newGitRunner(r.LocalDir, w.gitHubToken)
+	stack := w.newStackRunner(r.LocalDir)
+
+	branch := group.Branch
+	if branch == "" {
+		branch = groupBranchName(group)
+		group.Branch = branch
+	}
+
+	baseBranch := r.DefaultBranch
+	if group.StackOrder > 0 {
+		prev, err := w.previousGroup(ctx, group)
+		if err != nil {
+			return fmt.Errorf("resolve previous group: %w", err)
+		}
+		if prev != nil && prev.Branch != "" {
+			baseBranch = prev.Branch
+			group.BaseGroupID = prev.ID
+		}
+	}
+	group.BaseBranch = baseBranch
+
+	if err := ensureGroupBranch(group, git, branch, baseBranch); err != nil {
 		task.Status = "failed"
 		task.Output = err.Error()
 		return err
 	}
+	if err := w.store.UpdatePRGroup(ctx, group); err != nil {
+		return fmt.Errorf("update group branch: %w", err)
+	}
 
-	out, _, err := w.runTaskLifecycle(ctx, git, r, problem, task, branch)
+	out, err := w.runTaskLifecycle(ctx, git, r, problem, group, task, branch)
 	if err != nil {
 		task.Status = "failed"
 		task.Output = err.Error()
@@ -206,56 +256,113 @@ func (w *Worker) ExecuteTask(ctx context.Context, task *store.Task) error {
 	if err := w.store.UpdateTask(ctx, task); err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
+
+	groupComplete, err := w.isGroupComplete(ctx, group.ID)
+	if err != nil {
+		return fmt.Errorf("check group completion: %w", err)
+	}
+	if groupComplete {
+		if err := git.PushSetUpstream(group.Branch); err != nil {
+			return fmt.Errorf("push group branch: %w", err)
+		}
+		group.Status = "completed"
+		if err := w.store.UpdatePRGroup(ctx, group); err != nil {
+			return fmt.Errorf("update group status: %w", err)
+		}
+	}
+
+	problemComplete, err := w.isProblemComplete(ctx, problem.ID)
+	if err != nil {
+		return fmt.Errorf("check problem completion: %w", err)
+	}
+	if problemComplete {
+		if err := w.submitStack(ctx, stack, r, problem); err != nil {
+			return fmt.Errorf("submit stack: %w", err)
+		}
+	}
+
 	return nil
 }
 
-func (w *Worker) runTaskLifecycle(ctx context.Context, git gitRunner, r *store.Repo, problem *store.Problem, task *store.Task, branch string) (taskResult, bool, error) {
-	resume, err := shouldResumePostCommit(task, git, r.DefaultBranch)
+func (w *Worker) previousGroup(ctx context.Context, group *store.PRGroup) (*store.PRGroup, error) {
+	groups, err := w.store.ListPRGroupsByProblem(ctx, group.ProblemID)
 	if err != nil {
-		return taskResult{}, false, err
+		return nil, err
+	}
+	for _, g := range groups {
+		if g.StackOrder == group.StackOrder-1 {
+			return &g, nil
+		}
+	}
+	return nil, nil
+}
+
+func (w *Worker) isGroupComplete(ctx context.Context, groupID string) (bool, error) {
+	n, err := w.store.CountIncompleteTasksByPRGroup(ctx, groupID)
+	if err != nil {
+		return false, err
+	}
+	return n == 0, nil
+}
+
+func (w *Worker) isProblemComplete(ctx context.Context, problemID string) (bool, error) {
+	n, err := w.store.CountIncompleteTasksByProblem(ctx, problemID)
+	if err != nil {
+		return false, err
+	}
+	return n == 0, nil
+}
+
+func (w *Worker) submitStack(ctx context.Context, stack StackRunner, r *store.Repo, problem *store.Problem) error {
+	groups, err := w.store.ListPRGroupsByProblem(ctx, problem.ID)
+	if err != nil {
+		return fmt.Errorf("list groups: %w", err)
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	branches := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if g.Branch == "" {
+			return fmt.Errorf("group %s has no branch", g.ID)
+		}
+		branches = append(branches, g.Branch)
+	}
+	base := groups[0].BaseBranch
+	if base == "" {
+		base = r.DefaultBranch
+	}
+	if err := stack.StackInit(base, branches); err != nil {
+		return fmt.Errorf("gh stack init: %w", err)
+	}
+	if err := stack.StackSubmit(true, true); err != nil {
+		return fmt.Errorf("gh stack submit: %w", err)
+	}
+	return nil
+}
+
+func (w *Worker) runTaskLifecycle(ctx context.Context, git gitRunner, r *store.Repo, problem *store.Problem, group *store.PRGroup, task *store.Task, branch string) (taskResult, error) {
+	resume, err := taskCommitExists(git, task)
+	if err != nil {
+		return taskResult{}, err
 	}
 
 	out := taskResult{}
-	committedBranch := resume
 	if resume {
-		summary, err := headSummary(git)
+		summary, err := taskSummaryFromCommit(git, task)
 		if err != nil {
-			return taskResult{}, false, fmt.Errorf("resume task from branch: %w", err)
+			return taskResult{}, fmt.Errorf("resume task from branch: %w", err)
 		}
 		out.Status = "completed"
 		out.Summary = summary
-	} else {
-		var commitCreated bool
-		out, commitCreated, err = w.runAgentAndCommit(ctx, git, r, problem, task)
-		if err != nil {
-			return taskResult{}, commitCreated, err
-		}
-		committedBranch = commitCreated
+		return out, nil
 	}
 
-	if task.PRNumber == 0 {
-		if err := git.PushSetUpstream(branch); err != nil {
-			return taskResult{}, committedBranch, fmt.Errorf("push branch: %w", err)
-		}
-
-		prNumber, err := w.gh.CreatePullRequest(ctx, r.Owner, r.Name, task.Title, prBody(task, out), branch, r.DefaultBranch)
-		if err != nil {
-			return taskResult{}, committedBranch, fmt.Errorf("create pull request: %w", err)
-		}
-		task.PRNumber = prNumber
-	}
-
-	pr, err := w.gh.GetPullRequest(ctx, r.Owner, r.Name, task.PRNumber)
+	out, _, err = w.runAgentAndCommit(ctx, git, r, problem, task)
 	if err != nil {
-		return taskResult{}, committedBranch, fmt.Errorf("verify pull request: %w", err)
+		return taskResult{}, err
 	}
-	if pr == nil {
-		return taskResult{}, committedBranch, fmt.Errorf("verify pull request: pull request %d was nil", task.PRNumber)
-	}
-	if pr.Head.Ref != branch {
-		return taskResult{}, committedBranch, fmt.Errorf("task branch %q does not match pull request head %q", branch, pr.Head.Ref)
-	}
-	return out, committedBranch, nil
+	return out, nil
 }
 
 func (w *Worker) runAgentAndCommit(ctx context.Context, git gitRunner, r *store.Repo, problem *store.Problem, task *store.Task) (taskResult, bool, error) {
@@ -347,24 +454,24 @@ func resetIfChanged(git gitRunner) error {
 	return git.ResetHardClean()
 }
 
-func taskBranchName(task *store.Task) string {
-	slug := strings.ToLower(strings.TrimSpace(task.Title))
+func groupBranchName(group *store.PRGroup) string {
+	slug := strings.ToLower(strings.TrimSpace(group.Title))
 	slug = branchUnsafe.ReplaceAllString(slug, "-")
 	slug = strings.Trim(slug, "-")
 	if slug == "" {
-		slug = "task"
+		slug = "group"
 	}
 	if len(slug) > 48 {
 		slug = strings.Trim(slug[:48], "-")
 	}
 	if slug == "" {
-		slug = "task"
+		slug = "group"
 	}
-	return fmt.Sprintf("cttw/%s-%s", slug, strutil.ShortID(task.ID))
+	return fmt.Sprintf("cttw/%s-%s", slug, strutil.ShortID(group.ID))
 }
 
 func commitMessage(task *store.Task, out taskResult) string {
-	const prefix = "cttw: "
+	prefix := fmt.Sprintf("cttw[%s]: ", strutil.ShortID(task.ID))
 	summary := strings.TrimSpace(out.Summary)
 	if summary == "" {
 		summary = task.Title
@@ -379,22 +486,51 @@ func commitMessage(task *store.Task, out taskResult) string {
 	return prefix + summary
 }
 
-func prBody(task *store.Task, out taskResult) string {
-	var b strings.Builder
-	b.WriteString("Coordinated by cttw.\n\n")
-	if out.Summary != "" {
-		b.WriteString(out.Summary)
-		b.WriteString("\n\n")
+func taskCommitPrefix(task *store.Task) string {
+	return fmt.Sprintf("cttw[%s]:", strutil.ShortID(task.ID))
+}
+
+func taskCommitExists(git gitRunner, task *store.Task) (bool, error) {
+	prefix := taskCommitPrefix(task)
+	out, err := git.Output("log", "--grep", prefix, "--pretty=%s")
+	if err != nil {
+		return false, fmt.Errorf("search task commit: %w", err)
 	}
-	if len(out.Verification) > 0 {
-		b.WriteString("Verification:\n")
-		for _, cmd := range out.Verification {
-			b.WriteString("- ")
-			b.WriteString(cmd)
-			b.WriteByte('\n')
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+func taskSummaryFromCommit(git gitRunner, task *store.Task) (string, error) {
+	prefix := taskCommitPrefix(task)
+	out, err := git.Output("log", "--grep", prefix, "-1", "--pretty=%s")
+	if err != nil {
+		return "", err
+	}
+	summary := strings.TrimSpace(string(out))
+	summary = strings.TrimPrefix(summary, prefix)
+	return strings.TrimSpace(summary), nil
+}
+
+func ensureGroupBranch(group *store.PRGroup, git gitRunner, branch, baseBranch string) error {
+	currentBranch, err := git.CurrentBranch()
+	if err != nil {
+		return fmt.Errorf("current branch: %w", err)
+	}
+	changed, err := git.HasChanges()
+	if err != nil {
+		return fmt.Errorf("inspect git changes: %w", err)
+	}
+	if changed && currentBranch != branch {
+		return terminalTaskError(fmt.Errorf("workspace is dirty on branch %q; cannot start group branch %q", currentBranch, branch))
+	}
+	if currentBranch == branch {
+		return nil
+	}
+	if err := git.CheckoutNew(branch, baseBranch); err != nil {
+		if checkoutErr := git.Checkout(branch); checkoutErr != nil {
+			return fmt.Errorf("checkout group branch: %w", err)
 		}
 	}
-	return b.String()
+	return nil
 }
 
 type taskResult struct {
@@ -449,57 +585,4 @@ If you cannot complete the task, return ONLY:
 No markdown fences. No prose outside the JSON object.`, owner, name, baseBranch, title, description)
 }
 
-func ensureTaskBranch(task *store.Task, git gitRunner, branch, baseBranch string) error {
-	currentBranch, err := git.CurrentBranch()
-	if err != nil {
-		return fmt.Errorf("current branch: %w", err)
-	}
-	changed, err := git.HasChanges()
-	if err != nil {
-		return fmt.Errorf("inspect git changes: %w", err)
-	}
-	if changed && currentBranch != branch {
-		return terminalTaskError(fmt.Errorf("workspace is dirty on branch %q; cannot start task branch %q", currentBranch, branch))
-	}
-	if currentBranch == branch {
-		return nil
-	}
-	if err := git.CheckoutNew(branch, baseBranch); err != nil {
-		if checkoutErr := git.Checkout(branch); checkoutErr != nil {
-			return fmt.Errorf("checkout task branch: %w", err)
-		}
-	}
-	return nil
-}
 
-func shouldResumePostCommit(task *store.Task, git gitRunner, baseBranch string) (bool, error) {
-	changed, err := git.HasChanges()
-	if err != nil {
-		return false, fmt.Errorf("inspect git changes: %w", err)
-	}
-	if changed {
-		return false, nil
-	}
-	if task.PRNumber != 0 {
-		return true, nil
-	}
-	out, err := git.Output("rev-list", "--count", fmt.Sprintf("%s..HEAD", baseBranch))
-	if err != nil {
-		return false, fmt.Errorf("inspect branch commits: %w", err)
-	}
-	count, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return false, fmt.Errorf("parse branch commit count: %w", err)
-	}
-	return count > 0, nil
-}
-
-func headSummary(git gitRunner) (string, error) {
-	out, err := git.Output("log", "-1", "--pretty=%s")
-	if err != nil {
-		return "", err
-	}
-	summary := strings.TrimSpace(string(out))
-	summary = strings.TrimPrefix(summary, "cttw: ")
-	return summary, nil
-}

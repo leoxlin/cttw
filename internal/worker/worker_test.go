@@ -19,20 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type mockGH struct {
-	prs []struct {
-		Title string
-		Body  string
-		Head  string
-		Base  string
-	}
-	createPRError  error
-	createPRCalls  int
-	getPRError     error
-	getPRBranch    string
-	getPRCalledFor int
-	returnNilPR    bool
-}
+type mockGH struct{}
 
 func (m *mockGH) CreateIssue(ctx context.Context, owner, repo, title, body string) (int, error) {
 	return 0, nil
@@ -47,37 +34,28 @@ func (m *mockGH) CreateBranch(ctx context.Context, owner, repo, branch, base str
 }
 
 func (m *mockGH) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
-	m.createPRCalls++
-	if m.createPRError != nil {
-		return 0, m.createPRError
-	}
-	m.prs = append(m.prs, struct {
-		Title string
-		Body  string
-		Head  string
-		Base  string
-	}{Title: title, Body: body, Head: head, Base: base})
 	return 42, nil
 }
 
 func (m *mockGH) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
-	m.getPRCalledFor = number
-	if m.getPRError != nil {
-		return nil, m.getPRError
-	}
-	if m.returnNilPR {
-		return nil, nil
-	}
-	ref := m.getPRBranch
-	if ref == "" && len(m.prs) > 0 {
-		ref = m.prs[len(m.prs)-1].Head
-	}
-	return &github.PullRequest{
-		Number: number,
-		Head: struct {
-			Ref string `json:"ref"`
-		}{Ref: ref},
-	}, nil
+	return &github.PullRequest{Number: number}, nil
+}
+
+type mockStack struct {
+	initCalls   [][]string
+	initError   error
+	submitCalls []struct{ Auto, Open bool }
+	submitError error
+}
+
+func (m *mockStack) StackInit(base string, branches []string) error {
+	m.initCalls = append(m.initCalls, append([]string{base}, branches...))
+	return m.initError
+}
+
+func (m *mockStack) StackSubmit(auto, open bool) error {
+	m.submitCalls = append(m.submitCalls, struct{ Auto, Open bool }{Auto: auto, Open: open})
+	return m.submitError
 }
 
 func runGit(t *testing.T, dir string, args ...string) string {
@@ -92,6 +70,15 @@ func runGit(t *testing.T, dir string, args ...string) string {
 func gitStatus(t *testing.T, dir string) string {
 	t.Helper()
 	return runGit(t, dir, "status", "--porcelain")
+}
+
+func createGroupAndTask(ctx context.Context, t *testing.T, s *store.Store, problemID, repoID, title, description string, stackOrder, groupOrder, sequence int) (*store.PRGroup, *store.Task) {
+	t.Helper()
+	g, err := s.CreatePRGroup(ctx, problemID, repoID, title, description, stackOrder)
+	require.NoError(t, err)
+	task, err := s.CreateTaskInGroup(ctx, problemID, repoID, g.ID, title, description, groupOrder, sequence)
+	require.NoError(t, err)
+	return g, task
 }
 
 func initGitRepo(t *testing.T) string {
@@ -139,41 +126,41 @@ func TestBuildTaskPrompt_ForbidsGitManagement(t *testing.T) {
 	assert.Contains(t, prompt, `"verification"`)
 }
 
-func TestTaskBranchName_SanitizesArbitraryTitles(t *testing.T) {
+func TestGroupBranchName_SanitizesArbitraryTitles(t *testing.T) {
 	testCases := []struct {
 		title string
 		want  string
 	}{
 		{title: " Add Handler!!! / POST ", want: "cttw/add-handler-post-12345678"},
-		{title: "..", want: "cttw/task-12345678"},
+		{title: "..", want: "cttw/group-12345678"},
 		{title: "feature//subsystem", want: "cttw/feature-subsystem-12345678"},
 		{title: ".lock", want: "cttw/lock-12345678"},
 		{title: "trailing.", want: "cttw/trailing-12345678"},
 		{title: "--leading dash-like segments--", want: "cttw/leading-dash-like-segments-12345678"},
-		{title: "", want: "cttw/task-12345678"},
+		{title: "", want: "cttw/group-12345678"},
 	}
 
 	for _, tc := range testCases {
-		task := &store.Task{ID: "1234567890abcdef", Title: tc.title}
-		assert.Equal(t, tc.want, taskBranchName(task), tc.title)
+		group := &store.PRGroup{ID: "1234567890abcdef", Title: tc.title}
+		assert.Equal(t, tc.want, groupBranchName(group), tc.title)
 	}
 }
 
 func TestCommitMessage_PrefersSummary(t *testing.T) {
-	task := &store.Task{Title: "fallback title"}
+	task := &store.Task{ID: "task-id-123", Title: "fallback title"}
 	out := taskResult{Summary: "add POST handler"}
-	assert.Equal(t, "cttw: add POST handler", commitMessage(task, out))
+	assert.Equal(t, "cttw[task-id-]: add POST handler", commitMessage(task, out))
 }
 
 func TestCommitMessage_TruncatesTo72CharsIncludingPrefix(t *testing.T) {
-	task := &store.Task{Title: "fallback title"}
+	task := &store.Task{ID: "task-id-123", Title: "fallback title"}
 	out := taskResult{Summary: strings.Repeat("a", 80)}
 	got := commitMessage(task, out)
 	assert.Len(t, got, 72)
-	assert.Equal(t, "cttw: "+strings.Repeat("a", 66), got)
+	assert.Equal(t, "cttw[task-id-]: "+strings.Repeat("a", 56), got)
 }
 
-func TestWorker_ExecuteTask_ManagedLifecycleCommitsPushesAndCreatesPR(t *testing.T) {
+func TestWorker_ExecuteTask_ManagedLifecycleCommitsPushesAndSubmitsStack(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
@@ -184,8 +171,7 @@ func TestWorker_ExecuteTask_ManagedLifecycleCommitsPushesAndCreatesPR(t *testing
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	group, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -197,27 +183,34 @@ func TestWorker_ExecuteTask_ManagedLifecycleCommitsPushesAndCreatesPR(t *testing
 		}, nil
 	}
 
-	gh := &mockGH{}
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+	ms := &mockStack{}
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return ms }),
+	)
 	require.NoError(t, w.ExecuteTask(ctx, task))
 
 	got, err := s.GetTask(ctx, task.ID)
 	require.NoError(t, err)
-	branch := taskBranchName(task)
+	branch := groupBranchName(group)
 	assert.Equal(t, "completed", got.Status)
-	assert.Equal(t, branch, got.Branch)
-	assert.Equal(t, "main", got.BaseBranch)
 	assert.Equal(t, "added handler", got.Output)
-	assert.Equal(t, 42, got.PRNumber)
-	require.Len(t, gh.prs, 1)
-	assert.Equal(t, got.Branch, gh.prs[0].Head)
-	assert.Equal(t, "main", gh.prs[0].Base)
-	assert.Contains(t, gh.prs[0].Body, "added handler")
-	assert.Contains(t, gh.prs[0].Body, "Verification:")
-	assert.Equal(t, 42, gh.getPRCalledFor)
+
+	gotGroup, err := s.GetPRGroup(ctx, group.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", gotGroup.Status)
+	assert.Equal(t, branch, gotGroup.Branch)
+	assert.Equal(t, "main", gotGroup.BaseBranch)
+
 	assert.Equal(t, branch, runGit(t, dir, "rev-parse", "--abbrev-ref", "HEAD"))
 	assert.Contains(t, runGit(t, dir, "branch", "-r"), "origin/"+branch)
 	assert.Empty(t, gitStatus(t, dir))
+
+	require.Len(t, ms.initCalls, 1)
+	assert.Equal(t, "main", ms.initCalls[0][0])
+	assert.Equal(t, branch, ms.initCalls[0][1])
+	require.Len(t, ms.submitCalls, 1)
+	assert.True(t, ms.submitCalls[0].Auto)
+	assert.True(t, ms.submitCalls[0].Open)
 }
 
 func TestWorker_ExecuteTask_ManagedLifecycleUsesGitHubTokenForRunner(t *testing.T) {
@@ -231,8 +224,7 @@ func TestWorker_ExecuteTask_ManagedLifecycleUsesGitHubTokenForRunner(t *testing.
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -257,6 +249,7 @@ func TestWorker_ExecuteTask_ManagedLifecycleUsesGitHubTokenForRunner(t *testing.
 			gotToken = token
 			return &gitexec.Runner{Dir: dir, Token: token}
 		}),
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
 	)
 
 	require.NoError(t, w.ExecuteTask(ctx, task))
@@ -274,8 +267,7 @@ func TestWorker_ExecuteTask_ResetsOnAgentFailure(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -287,7 +279,9 @@ func TestWorker_ExecuteTask_ResetsOnAgentFailure(t *testing.T) {
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "task failed")
@@ -306,8 +300,7 @@ func TestWorker_ExecuteTask_ResetsPromptErrorAfterEdits(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -318,7 +311,9 @@ func TestWorker_ExecuteTask_ResetsPromptErrorAfterEdits(t *testing.T) {
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prompt agent")
@@ -337,8 +332,7 @@ func TestWorker_ExecuteTask_ResetsMalformedJSONAfterEdits(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -350,7 +344,9 @@ func TestWorker_ExecuteTask_ResetsMalformedJSONAfterEdits(t *testing.T) {
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse task result")
@@ -369,8 +365,7 @@ func TestWorker_ExecuteTask_CompletesWithRealDiffDespiteEmptyKeyChanges(t *testi
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -382,13 +377,14 @@ func TestWorker_ExecuteTask_CompletesWithRealDiffDespiteEmptyKeyChanges(t *testi
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	require.NoError(t, w.ExecuteTask(ctx, task))
 
 	got, err := s.GetTask(ctx, task.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "completed", got.Status)
-	assert.Equal(t, 42, got.PRNumber)
 	assert.FileExists(t, filepath.Join(dir, "handler.go"))
 	assert.Empty(t, gitStatus(t, dir))
 }
@@ -404,8 +400,7 @@ func TestWorker_ExecuteTask_ResetsWhenCompletedTaskProducesNoDiff(t *testing.T) 
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -414,7 +409,9 @@ func TestWorker_ExecuteTask_ResetsWhenCompletedTaskProducesNoDiff(t *testing.T) 
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no changes")
@@ -437,8 +434,7 @@ func TestWorker_ExecuteTask_PreservesWorkspaceOnCommitFailure(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -450,7 +446,9 @@ func TestWorker_ExecuteTask_PreservesWorkspaceOnCommitFailure(t *testing.T) {
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	err = w.ExecuteTask(ctx, task)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "commit failed")
@@ -470,29 +468,34 @@ func TestWorker_ExecuteTask_FailsNewTaskWhenOtherBranchIsDirty(t *testing.T) {
 
 	problemA, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	taskA, err := s.CreateTask(ctx, problemA.ID, r.ID, "first task", "break commit")
-	require.NoError(t, err)
-	taskA.Branch = taskBranchName(taskA)
-	taskA.Status = "failed"
-	taskA.Output = "commit failed"
+	groupA, taskA := createGroupAndTask(ctx, t, s, problemA.ID, r.ID, "first task", "break commit", 0, 0, 0)
+	branchA := groupBranchName(groupA)
+	taskA.Branch = branchA
+	taskA.Status = "completed"
+	taskA.Output = "done"
 	require.NoError(t, s.UpdateTask(ctx, taskA))
+	groupA.Branch = branchA
+	groupA.Status = "failed"
+	groupA.Output = "left branch dirty"
+	require.NoError(t, s.UpdatePRGroup(ctx, groupA))
 
-	runGit(t, dir, "checkout", "-b", taskA.Branch, "main")
+	runGit(t, dir, "checkout", "-b", branchA, "main")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "handler.go"), []byte("package main\n"), 0644))
 	require.NotEmpty(t, gitStatus(t, dir))
 
 	problemB, err := s.CreateProblem(ctx, "build UI", r.ID)
 	require.NoError(t, err)
-	taskB, err := s.CreateTask(ctx, problemB.ID, r.ID, "second task", "should not start")
-	require.NoError(t, err)
+	_, taskB := createGroupAndTask(ctx, t, s, problemB.ID, r.ID, "second task", "should not start", 0, 0, 1)
 	taskB.MaxAttempts = 1
 	require.NoError(t, s.UpdateTask(ctx, taskB))
 
-	w := New(s, &launcher.MockLauncher{}, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, &launcher.MockLauncher{}, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	err = w.RunOnce(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "workspace is dirty")
-	assert.Contains(t, err.Error(), taskA.Branch)
+	assert.Contains(t, err.Error(), branchA)
 	assert.NotEmpty(t, gitStatus(t, dir))
 
 	got, err := s.GetTask(ctx, taskB.ID)
@@ -517,8 +520,7 @@ func TestWorker_RunOnce_PreservesCommitFailureAsFailed(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	launches := 0
 	ml := &launcher.MockLauncher{}
@@ -532,7 +534,9 @@ func TestWorker_RunOnce_PreservesCommitFailureAsFailed(t *testing.T) {
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	err = w.RunOnce(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "commit failed")
@@ -564,8 +568,7 @@ func TestWorker_RunOnceForRepo_PreservesCommitFailureAsFailed(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	launches := 0
 	ml := &launcher.MockLauncher{}
@@ -579,7 +582,9 @@ func TestWorker_RunOnceForRepo_PreservesCommitFailureAsFailed(t *testing.T) {
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	err = w.RunOnceForRepo(ctx, r.ID)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "commit failed")
@@ -595,181 +600,6 @@ func TestWorker_RunOnceForRepo_PreservesCommitFailureAsFailed(t *testing.T) {
 	assert.Equal(t, 1, launches)
 }
 
-func TestWorker_RunOnce_RetriesCreatePullRequestWithoutRelaunchingAgent(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	ctx := context.Background()
-	dir := initGitRepo(t)
-	r, err := s.CreateRepo(ctx, "llin", "cttw", dir, "main", "")
-	require.NoError(t, err)
-	problem, err := s.CreateProblem(ctx, "build API", r.ID)
-	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
-
-	launches := 0
-	ml := &launcher.MockLauncher{}
-	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		launches++
-		return &launcher.MockAgent{
-			OnPrompt: func(prompt string) {
-				require.NoError(t, os.WriteFile(filepath.Join(dir, "handler.go"), []byte("package main\n"), 0644))
-			},
-			Responses: []string{`{"status":"completed","summary":"added handler","key_changes_made":["handler"],"key_learnings":[],"verification":["go test ./..."]}`},
-		}, nil
-	}
-
-	gh := &mockGH{createPRError: errors.New("transient create PR failure")}
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
-
-	err = w.RunOnce(ctx)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "create pull request")
-	assert.Equal(t, 1, launches)
-	assert.Empty(t, gitStatus(t, dir))
-
-	got, err := s.GetTask(ctx, task.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "pending", got.Status)
-	assert.Equal(t, 1, got.Attempts)
-	assert.NotEmpty(t, got.Branch)
-	assert.Zero(t, got.PRNumber)
-
-	gh.createPRError = nil
-	require.NoError(t, w.RunOnce(ctx))
-	assert.Equal(t, 1, launches)
-	assert.Len(t, gh.prs, 1)
-	assert.Equal(t, 2, gh.createPRCalls)
-
-	got, err = s.GetTask(ctx, task.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "completed", got.Status)
-	assert.Equal(t, 42, got.PRNumber)
-}
-
-func TestWorker_RunOnce_RetriesPullRequestVerificationWithoutRelaunchingAgent(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	ctx := context.Background()
-	dir := initGitRepo(t)
-	r, err := s.CreateRepo(ctx, "llin", "cttw", dir, "main", "")
-	require.NoError(t, err)
-	problem, err := s.CreateProblem(ctx, "build API", r.ID)
-	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
-
-	launches := 0
-	ml := &launcher.MockLauncher{}
-	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		launches++
-		return &launcher.MockAgent{
-			OnPrompt: func(prompt string) {
-				require.NoError(t, os.WriteFile(filepath.Join(dir, "handler.go"), []byte("package main\n"), 0644))
-			},
-			Responses: []string{`{"status":"completed","summary":"added handler","key_changes_made":["handler"],"key_learnings":[],"verification":["go test ./..."]}`},
-		}, nil
-	}
-
-	gh := &mockGH{getPRError: errors.New("transient get PR failure")}
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
-
-	err = w.RunOnce(ctx)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "verify pull request")
-	assert.Equal(t, 1, launches)
-	assert.Len(t, gh.prs, 1)
-
-	got, err := s.GetTask(ctx, task.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "pending", got.Status)
-	assert.Equal(t, 42, got.PRNumber)
-
-	gh.getPRError = nil
-	require.NoError(t, w.RunOnce(ctx))
-	assert.Equal(t, 1, launches)
-	assert.Len(t, gh.prs, 1)
-	assert.Equal(t, 1, gh.createPRCalls)
-
-	got, err = s.GetTask(ctx, task.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "completed", got.Status)
-	assert.Equal(t, 42, got.PRNumber)
-}
-
-func TestWorker_ExecuteTask_FailsWhenPullRequestVerificationFails(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	ctx := context.Background()
-	dir := initGitRepo(t)
-	r, err := s.CreateRepo(ctx, "llin", "cttw", dir, "main", "")
-	require.NoError(t, err)
-	problem, err := s.CreateProblem(ctx, "build API", r.ID)
-	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
-	task.MaxAttempts = 1
-	require.NoError(t, s.UpdateTask(ctx, task))
-
-	ml := &launcher.MockLauncher{}
-	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		return &launcher.MockAgent{
-			OnPrompt: func(prompt string) {
-				require.NoError(t, os.WriteFile(filepath.Join(dir, "handler.go"), []byte("package main\n"), 0644))
-			},
-			Responses: []string{`{"status":"completed","summary":"added handler","key_changes_made":["handler"],"key_learnings":[],"verification":["go test ./..."]}`},
-		}, nil
-	}
-
-	gh := &mockGH{getPRError: errors.New("pull request not found")}
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
-	require.Error(t, w.RunOnce(ctx))
-
-	got, err := s.GetTask(ctx, task.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "failed", got.Status)
-	assert.Contains(t, got.Output, "verify pull request")
-	assert.Equal(t, 42, gh.getPRCalledFor)
-}
-
-func TestWorker_ExecuteTask_FailsWhenPullRequestVerificationReturnsNil(t *testing.T) {
-	s, err := store.New(":memory:")
-	require.NoError(t, err)
-	defer s.Close()
-
-	ctx := context.Background()
-	dir := initGitRepo(t)
-	r, err := s.CreateRepo(ctx, "llin", "cttw", dir, "main", "")
-	require.NoError(t, err)
-	problem, err := s.CreateProblem(ctx, "build API", r.ID)
-	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
-
-	ml := &launcher.MockLauncher{}
-	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		return &launcher.MockAgent{
-			OnPrompt: func(prompt string) {
-				require.NoError(t, os.WriteFile(filepath.Join(dir, "handler.go"), []byte("package main\n"), 0644))
-			},
-			Responses: []string{`{"status":"completed","summary":"added handler","key_changes_made":["handler"],"key_learnings":[],"verification":["go test ./..."]}`},
-		}, nil
-	}
-
-	gh := &mockGH{returnNilPR: true}
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
-	err = w.ExecuteTask(ctx, task)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "verify pull request")
-	assert.Contains(t, err.Error(), "was nil")
-}
-
 func TestWorker_RunOnce_AttemptCountAfterFailure(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
@@ -781,8 +611,7 @@ func TestWorker_RunOnce_AttemptCountAfterFailure(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -791,7 +620,9 @@ func TestWorker_RunOnce_AttemptCountAfterFailure(t *testing.T) {
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 
 	require.Error(t, w.RunOnce(ctx))
 	got, err := s.GetTask(ctx, task.ID)
@@ -824,8 +655,7 @@ func TestWorker_RunOnce_ReturnsUpdateError(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	_, err = s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, _ = createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -834,7 +664,9 @@ func TestWorker_RunOnce_ReturnsUpdateError(t *testing.T) {
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	err = w.RunOnce(ctx)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errUpdate)
@@ -852,8 +684,7 @@ func TestWorker_RunOnce_CompletedWithoutDiffFailsTask(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
+	_, task := createGroupAndTask(ctx, t, s, problem.ID, r.ID, "add handler", "implement POST", 0, 0, 0)
 	task.MaxAttempts = 1
 	require.NoError(t, s.UpdateTask(ctx, task))
 
@@ -864,7 +695,9 @@ func TestWorker_RunOnce_CompletedWithoutDiffFailsTask(t *testing.T) {
 		}, nil
 	}
 
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 	require.Error(t, w.RunOnce(ctx))
 
 	got, err := s.GetTask(ctx, task.ID)
@@ -884,8 +717,8 @@ func TestWorker_RunOnceForRepo(t *testing.T) {
 	r2, _ := s.CreateRepo(ctx, "o2", "r2", dir2, "main", "")
 	p1, _ := s.CreateProblem(ctx, "x", r1.ID)
 	p2, _ := s.CreateProblem(ctx, "y", r2.ID)
-	_, _ = s.CreateTask(ctx, p1.ID, r1.ID, "t1", "d1")
-	t2, _ := s.CreateTask(ctx, p2.ID, r2.ID, "t2", "d2")
+	_, _ = createGroupAndTask(ctx, t, s, p1.ID, r1.ID, "t1", "d1", 0, 0, 0)
+	_, t2 := createGroupAndTask(ctx, t, s, p2.ID, r2.ID, "t2", "d2", 0, 0, 0)
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
@@ -896,14 +729,15 @@ func TestWorker_RunOnceForRepo(t *testing.T) {
 			Responses: []string{`{"status":"completed","summary":"did task 2","key_changes_made":["task"],"key_learnings":[],"verification":["go test ./..."]}`},
 		}, nil
 	}
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute)
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return &mockStack{} }),
+	)
 
 	require.NoError(t, w.RunOnceForRepo(ctx, r2.ID))
 
 	got, err := s.GetTask(ctx, t2.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "completed", got.Status)
-	assert.Equal(t, 42, got.PRNumber)
 
 	tasks, err := s.ListTasksByProblem(ctx, p1.ID)
 	require.NoError(t, err)
@@ -911,7 +745,7 @@ func TestWorker_RunOnceForRepo(t *testing.T) {
 	assert.Equal(t, "pending", tasks[0].Status)
 }
 
-func TestWorker_ExecuteTask_FailsWhenBranchMismatch(t *testing.T) {
+func TestWorker_GroupsStackCommitsAndWaitsForPreviousGroup(t *testing.T) {
 	s, err := store.New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
@@ -922,28 +756,92 @@ func TestWorker_ExecuteTask_FailsWhenBranchMismatch(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	task, err := s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
-	require.NoError(t, err)
-	task.MaxAttempts = 1
-	require.NoError(t, s.UpdateTask(ctx, task))
 
+	group1, err := s.CreatePRGroup(ctx, problem.ID, r.ID, "group one", "first group", 0)
+	require.NoError(t, err)
+	task1, err := s.CreateTaskInGroup(ctx, problem.ID, r.ID, group1.ID, "task one", "", 0, 0)
+	require.NoError(t, err)
+	task2, err := s.CreateTaskInGroup(ctx, problem.ID, r.ID, group1.ID, "task two", "", 1, 1)
+	require.NoError(t, err)
+	group2, err := s.CreatePRGroup(ctx, problem.ID, r.ID, "group two", "second group", 1)
+	require.NoError(t, err)
+	task3, err := s.CreateTaskInGroup(ctx, problem.ID, r.ID, group2.ID, "task three", "", 0, 2)
+	require.NoError(t, err)
+
+	branch1 := groupBranchName(group1)
+	branch2 := groupBranchName(group2)
+
+	launches := 0
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
+		launches++
 		return &launcher.MockAgent{
 			OnPrompt: func(prompt string) {
-				require.NoError(t, os.WriteFile(filepath.Join(dir, "handler.go"), []byte("package main\n"), 0644))
+				file := filepath.Join(dir, "task"+string(rune('0'+launches))+".go")
+				require.NoError(t, os.WriteFile(file, []byte("package main\n"), 0644))
 			},
-			Responses: []string{`{"status":"completed","summary":"added handler","key_changes_made":["handler"],"key_learnings":[],"verification":["go test ./..."]}`},
+			Responses: []string{`{"status":"completed","summary":"did work","key_changes_made":["work"],"key_learnings":[],"verification":["go test ./..."]}`},
 		}, nil
 	}
 
-	gh := &mockGH{getPRBranch: "different-branch"}
-	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
-	require.Error(t, w.RunOnce(ctx))
+	ms := &mockStack{}
+	w := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGH{}, "codex", time.Minute,
+		withStackRunnerFactory(func(dir string) StackRunner { return ms }),
+	)
 
-	got, err := s.GetTask(ctx, task.ID)
+	// First run: task1 commits to group1 branch, group1 stays incomplete.
+	require.NoError(t, w.RunOnce(ctx))
+	assert.Equal(t, 1, launches)
+
+	got1, err := s.GetTask(ctx, task1.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "failed", got.Status)
-	assert.Contains(t, got.Output, "does not match pull request")
-	assert.Equal(t, 42, gh.getPRCalledFor)
+	assert.Equal(t, "completed", got1.Status)
+
+	gotG1, err := s.GetPRGroup(ctx, group1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", gotG1.Status)
+	assert.Equal(t, branch1, gotG1.Branch)
+
+	// Second run: task2 commits to group1 branch, group1 completes and pushes.
+	require.NoError(t, w.RunOnce(ctx))
+	assert.Equal(t, 2, launches)
+
+	gotG1, err = s.GetPRGroup(ctx, group1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", gotG1.Status)
+	assert.Contains(t, runGit(t, dir, "branch", "-r"), "origin/"+branch1)
+
+	// Third run: task3 starts group2 branch based on group1 branch.
+	require.NoError(t, w.RunOnce(ctx))
+	assert.Equal(t, 3, launches)
+
+	got3, err := s.GetTask(ctx, task3.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", got3.Status)
+
+	gotG2, err := s.GetPRGroup(ctx, group2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", gotG2.Status)
+	assert.Equal(t, branch1, gotG2.BaseBranch)
+	assert.Equal(t, group1.ID, gotG2.BaseGroupID)
+	assert.Contains(t, runGit(t, dir, "branch", "-r"), "origin/"+branch2)
+
+	// Both group branches were initialized and the stack was submitted.
+	require.Len(t, ms.initCalls, 1)
+	assert.Equal(t, "main", ms.initCalls[0][0])
+	assert.Equal(t, branch1, ms.initCalls[0][1])
+	assert.Equal(t, branch2, ms.initCalls[0][2])
+	require.Len(t, ms.submitCalls, 1)
+	assert.True(t, ms.submitCalls[0].Auto)
+	assert.True(t, ms.submitCalls[0].Open)
+
+	// Verify group1 has two commits from the two tasks.
+	logOut := runGit(t, dir, "log", "--pretty=%s", branch1)
+	assert.Contains(t, logOut, taskCommitPrefix(task1))
+	assert.Contains(t, logOut, taskCommitPrefix(task2))
+
+	// Verify task3 commit is on group2 branch.
+	logOut2 := runGit(t, dir, "log", "--pretty=%s", branch2)
+	assert.Contains(t, logOut2, taskCommitPrefix(task3))
+	assert.Empty(t, gitStatus(t, dir))
 }

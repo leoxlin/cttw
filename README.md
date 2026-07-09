@@ -3,9 +3,17 @@
 > Claudivicus! Take the wheel.
 
 A TUI CLI + daemon that coordinates ACP agents to break user problems into
-tasks, tracks them via GitHub issues/sub-issues, and opens stacked PRs.
+feature-complete PR groups, tracks them via GitHub issues/sub-issues, and opens
+stacked PRs using `gh stack`.
 
 ## Quick Start
+
+`cttw` uses the GitHub CLI (`gh`) and the `gh-stack` extension to create and
+submit stacked pull requests. Install them first:
+
+```bash
+gh extension install github/gh-stack
+```
 
 ```bash
 export GITHUB_TOKEN=...   # optional if `gh auth token` is available
@@ -54,8 +62,8 @@ You can also point to a custom config file with `CTTW_CONFIG=/path/to/config.tom
 ## Architecture
 
 - **Daemon** persists state in SQLite, registers repos, exposes a Unix-socket HTTP API, and polls for pending tasks.
-- **Coordinator** launches an ACP agent per problem to decompose it into tasks and creates GitHub issues.
-- **Worker** launches an ACP agent per task to edit and validate code, while cttw owns branch creation, commits, rollback, push, and pull request creation. Agents return structured JSON describing the result; cttw commits successful diffs and resets failed or no-op diffs.
+- **Coordinator** launches an ACP agent per problem to decompose it into a small number of feature-complete PR groups. Each group becomes one branch/PR and may contain multiple tasks that are committed together. It creates a parent GitHub issue for the problem and child issues for each group.
+- **Worker** launches an ACP agent per task to edit and validate code, while cttw owns branch creation, commits, rollback, push, and PR submission. Tasks within a group are executed serially on the group's branch; groups stack on top of each other. When all groups for a problem are complete, `cttw` uses `gh stack` to submit the stack of PRs. Agents return structured JSON describing the result; cttw commits successful diffs and resets failed or no-op diffs.
 - **CLI/TUI** talk to the daemon over the Unix socket.
 
 cttw does not hold LLM API keys; agents are external processes that implement the [Agent Client Protocol](https://agentclientprotocol.com).
@@ -70,7 +78,7 @@ designed for unattended daemon execution, the local handler auto-approves all
 this level of access is acceptable.
 Agents still run with local repository access through ACP, but they are not asked to perform git management actions. cttw treats the local checkout as a managed transaction boundary and handles commit, reset, push, and PR creation itself.
 
-> **Note:** This branch uses a new SQLite schema (`repos`, `problems`, `tasks`). Legacy tables from earlier versions (`chunks`, `jobs`, `config`, and any old `tasks`) are left in place when opening an existing database but are no longer used.
+> **Note:** This branch uses a SQLite schema with `repos`, `problems`, `pr_groups`, and `tasks`. Legacy tables from earlier versions (`chunks`, `jobs`, `config`, and any old `tasks`) are left in place when opening an existing database but are no longer used.
 
 ## Development
 

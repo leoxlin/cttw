@@ -20,7 +20,7 @@ func TestMigrations_AreIdempotent(t *testing.T) {
 	var version int
 	row := s.db.QueryRow(`SELECT version FROM schema_version ORDER BY version DESC LIMIT 1`)
 	require.NoError(t, row.Scan(&version))
-	assert.Equal(t, 1, version)
+	assert.Equal(t, 2, version)
 
 	// Insert a problem to verify tables exist.
 	ctx := context.Background()
@@ -38,7 +38,7 @@ func TestMigrations_AreIdempotent(t *testing.T) {
 	var version2 int
 	row = s2.db.QueryRow(`SELECT version FROM schema_version ORDER BY version DESC LIMIT 1`)
 	require.NoError(t, row.Scan(&version2))
-	assert.Equal(t, 1, version2)
+	assert.Equal(t, 2, version2)
 
 	// Data should still be present.
 	problems, err := s2.ListProblems(ctx)
@@ -197,4 +197,110 @@ func TestNextPendingTask(t *testing.T) {
 	again, err := s.NextPendingTask(ctx)
 	require.NoError(t, err)
 	assert.Nil(t, again)
+}
+
+
+func TestPRGroup_CRUD(t *testing.T) {
+	s, err := New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	ctx := context.Background()
+
+	repo, _ := s.CreateRepo(ctx, "o", "r", "/tmp/r", "main", "")
+	problem, _ := s.CreateProblem(ctx, "build API", repo.ID)
+
+	g, err := s.CreatePRGroup(ctx, problem.ID, repo.ID, "add handler", "implement POST", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", g.Status)
+	assert.Equal(t, 0, g.StackOrder)
+
+	got, err := s.GetPRGroup(ctx, g.ID)
+	require.NoError(t, err)
+	assert.Equal(t, g.ID, got.ID)
+
+	groups, err := s.ListPRGroupsByProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+	assert.Equal(t, "add handler", groups[0].Title)
+
+	g.Status = "completed"
+	require.NoError(t, s.UpdatePRGroup(ctx, g))
+	updated, err := s.GetPRGroup(ctx, g.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", updated.Status)
+}
+
+func TestCreateTaskInGroup(t *testing.T) {
+	s, err := New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	ctx := context.Background()
+
+	repo, _ := s.CreateRepo(ctx, "o", "r", "/tmp/r", "main", "")
+	problem, _ := s.CreateProblem(ctx, "build API", repo.ID)
+	g, _ := s.CreatePRGroup(ctx, problem.ID, repo.ID, "feature", "desc", 0)
+
+	task, err := s.CreateTaskInGroup(ctx, problem.ID, repo.ID, g.ID, "t1", "d1", 0, 5)
+	require.NoError(t, err)
+	assert.Equal(t, g.ID, task.PRGroupID)
+	assert.Equal(t, 0, task.GroupOrder)
+	assert.Equal(t, 5, task.Sequence)
+}
+
+func TestNextPendingTask_RespectsSequence(t *testing.T) {
+	s, err := New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	ctx := context.Background()
+
+	repo, _ := s.CreateRepo(ctx, "o", "r", "/tmp/r", "main", "")
+	problem, _ := s.CreateProblem(ctx, "x", repo.ID)
+	g, _ := s.CreatePRGroup(ctx, problem.ID, repo.ID, "g", "d", 0)
+
+	t1, _ := s.CreateTaskInGroup(ctx, problem.ID, repo.ID, g.ID, "t1", "d1", 0, 1)
+	t2, _ := s.CreateTaskInGroup(ctx, problem.ID, repo.ID, g.ID, "t2", "d2", 1, 2)
+
+	got, err := s.NextPendingTask(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, t1.ID, got.ID)
+
+	// t2 is still blocked because t1 is running.
+	again, err := s.NextPendingTask(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, again)
+
+	// Complete t1; t2 becomes available.
+	got.Status = "completed"
+	require.NoError(t, s.UpdateTask(ctx, got))
+
+	got2, err := s.NextPendingTask(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got2)
+	assert.Equal(t, t2.ID, got2.ID)
+}
+
+func TestCountIncompleteTasksByPRGroup(t *testing.T) {
+	s, err := New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	ctx := context.Background()
+
+	repo, _ := s.CreateRepo(ctx, "o", "r", "/tmp/r", "main", "")
+	problem, _ := s.CreateProblem(ctx, "x", repo.ID)
+	g, _ := s.CreatePRGroup(ctx, problem.ID, repo.ID, "g", "d", 0)
+
+	_, _ = s.CreateTaskInGroup(ctx, problem.ID, repo.ID, g.ID, "t1", "d1", 0, 1)
+	t2, _ := s.CreateTaskInGroup(ctx, problem.ID, repo.ID, g.ID, "t2", "d2", 1, 2)
+
+	n, err := s.CountIncompleteTasksByPRGroup(ctx, g.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	t2.Status = "completed"
+	require.NoError(t, s.UpdateTask(ctx, t2))
+
+	n, err = s.CountIncompleteTasksByPRGroup(ctx, g.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
 }

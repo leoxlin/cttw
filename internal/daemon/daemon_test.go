@@ -46,6 +46,11 @@ func (m *mockGH) GetPullRequest(ctx context.Context, owner, repo string, number 
 	return nil, nil
 }
 
+type noopStackRunner struct{}
+
+func (n *noopStackRunner) StackInit(base string, branches []string) error { return nil }
+func (n *noopStackRunner) StackSubmit(auto, open bool) error              { return nil }
+
 type mockRegistry struct {
 	dir string
 }
@@ -89,7 +94,9 @@ func TestServer_ShutdownWaitsForWorkerLoop(t *testing.T) {
 	require.NoError(t, err)
 	problem, err := s.CreateProblem(ctx, "build API", r.ID)
 	require.NoError(t, err)
-	_, err = s.CreateTask(ctx, problem.ID, r.ID, "add handler", "implement POST")
+	g, err := s.CreatePRGroup(ctx, problem.ID, r.ID, "add handler", "implement POST", 0)
+	require.NoError(t, err)
+	_, err = s.CreateTaskInGroup(ctx, problem.ID, r.ID, g.ID, "add handler", "implement POST", 0, 0)
 	require.NoError(t, err)
 
 	ml := &launcher.MockLauncher{}
@@ -108,7 +115,8 @@ func TestServer_ShutdownWaitsForWorkerLoop(t *testing.T) {
 		}, nil
 	}
 
-	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute,
+		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -156,7 +164,7 @@ func TestServer_CreateProblem_AcceptsAsync(t *testing.T) {
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
 		return &launcher.MockAgent{
-			Responses: []string{`[{"title":"t1","description":"d1"}]`},
+			Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`},
 			OnPrompt: func(prompt string) {
 				close(decompositionStarted)
 				<-continueDecomposition
@@ -166,7 +174,8 @@ func TestServer_CreateProblem_AcceptsAsync(t *testing.T) {
 	gh := &mockGH{issues: make(map[string]int)}
 	regRoot := filepath.Join(t.TempDir(), "repos")
 	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
-	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute,
+		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -218,12 +227,13 @@ func TestServer_CreateProblem_LazyRegistersRepo(t *testing.T) {
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+		return &launcher.MockAgent{Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`}}, nil
 	}
 	gh := &mockGH{issues: make(map[string]int)}
 	reg := &mockRegistry{dir: initDaemonGitRepo(t)}
 	coord := coordinator.New(s, ml, reg, gh, "codex", time.Minute, coordinator.WithToken("tok"))
-	w := worker.New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute)
+	w := worker.New(s, ml, &repo.Registry{Root: t.TempDir()}, gh, "codex", time.Minute,
+		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -345,14 +355,15 @@ func TestServer_CreateAndGetProblem(t *testing.T) {
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
 		return &launcher.MockAgent{
-			Responses: []string{`[{"title":"t1","description":"d1"}]`},
+			Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`},
 		}, nil
 	}
 
 	gh := &mockGH{issues: make(map[string]int)}
 	regRoot := filepath.Join(t.TempDir(), "repos")
 	coord := coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
-	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute)
+	w := worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute,
+		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
 
 	sockFile := filepath.Join(t.TempDir(), "cttw.sock")
 	srv := &Server{
@@ -450,7 +461,8 @@ func TestServer_UpdateProblem(t *testing.T) {
 	srv := &Server{
 		Store:       s,
 		Coordinator: coordinator.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute),
-		Worker:      worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute),
+		Worker:      worker.New(s, ml, &repo.Registry{Root: regRoot}, gh, "codex", time.Minute,
+			worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} })),
 		Socket:      "unix://" + sockFile,
 		shutdown:    make(chan struct{}),
 	}

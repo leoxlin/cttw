@@ -187,15 +187,21 @@ func (c *Coordinator) decomposeProblem(bg context.Context, problem *store.Proble
 	}
 
 	// Prompt for decomposition with a bounded timeout.
-	prompt := fmt.Sprintf(`You are a software engineering coordinator. Break the following problem into small, implementable tasks for a single repository.
+	prompt := fmt.Sprintf(`You are a software engineering coordinator. Break the following problem into a small number of feature-complete pull requests for a single repository.
+
+Each pull request should be a complete, reviewable feature and may contain multiple dependent tasks that are committed together.
 
 Repository: %s/%s
 Problem: %s
 
-Return ONLY a JSON array of objects, each with "title" and "description" fields. Example:
-[{"title":"add handler","description":"implement POST endpoint"}]
+Return ONLY a JSON object with this shape:
+{"pr_groups":[{"title":"Feature title for the PR","description":"What this PR implements","tasks":[{"title":"Task title","description":"Task details"}]}]}
 
-Do not include markdown fences or explanation.`, owner, name, description)
+Rules:
+- Groups are ordered from first (base of the stack) to last (top of the stack). Later groups build on earlier groups.
+- Tasks within a group are executed in the order given; each task becomes one commit in the group's branch.
+- Keep the number of PRs small; group related tasks into one PR rather than opening one PR per task.
+- Do not include markdown fences or explanation.`, owner, name, description)
 
 	promptCtx, cancel := context.WithTimeout(bg, c.promptTimeout)
 	defer cancel()
@@ -206,28 +212,37 @@ Do not include markdown fences or explanation.`, owner, name, description)
 		return
 	}
 
-	tasks, err := parseTasks(res.Content)
+	groups, err := parsePRGroups(res.Content)
 	if err != nil {
 		markFailed()
-		log.Printf("coordinator parse tasks: %v", err)
+		log.Printf("coordinator parse pr groups: %v", err)
 		return
 	}
-	if len(tasks) == 0 {
+	if len(groups) == 0 {
 		markFailed()
-		log.Printf("coordinator decomposition returned no tasks")
+		log.Printf("coordinator decomposition returned no pr groups")
 		return
 	}
 
-	// Create tasks in the store before exposing any GitHub state.
-	createdTasks := make([]*store.Task, 0, len(tasks))
-	for _, task := range tasks {
-		t, err := c.store.CreateTask(bg, problem.ID, r.ID, task.Title, task.Description)
+	// Create PR groups and their tasks in the store before exposing any GitHub state.
+	createdGroups := make([]*store.PRGroup, 0, len(groups))
+	for i, g := range groups {
+		pg, err := c.store.CreatePRGroup(bg, problem.ID, r.ID, g.Title, g.Description, i)
 		if err != nil {
 			markFailed()
-			log.Printf("coordinator create task: %v", err)
+			log.Printf("coordinator create pr group: %v", err)
 			return
 		}
-		createdTasks = append(createdTasks, t)
+		createdGroups = append(createdGroups, pg)
+
+		for j, task := range g.Tasks {
+			sequence := i*1000 + j
+			if _, err := c.store.CreateTaskInGroup(bg, problem.ID, r.ID, pg.ID, task.Title, task.Description, j, sequence); err != nil {
+				markFailed()
+				log.Printf("coordinator create task: %v", err)
+				return
+			}
+		}
 	}
 
 	// Create the parent GitHub issue only after decomposition succeeds.
@@ -244,18 +259,18 @@ Do not include markdown fences or explanation.`, owner, name, description)
 		return
 	}
 
-	// Create child issues and link them to the parent.
-	for _, t := range createdTasks {
-		childNumber, err := c.gh.CreateIssue(bg, owner, name, t.Title, t.Description)
+	// Create child issues per PR group and link them to the parent.
+	for _, g := range createdGroups {
+		childNumber, err := c.gh.CreateIssue(bg, owner, name, g.Title, g.Description)
 		if err != nil {
 			markFailed()
-			log.Printf("coordinator create task issue: %v", err)
+			log.Printf("coordinator create group issue: %v", err)
 			return
 		}
-		t.IssueNumber = childNumber
-		if err := c.store.UpdateTask(bg, t); err != nil {
+		g.IssueNumber = childNumber
+		if err := c.store.UpdatePRGroup(bg, g); err != nil {
 			markFailed()
-			log.Printf("coordinator update task issue number: %v", err)
+			log.Printf("coordinator update group issue number: %v", err)
 			return
 		}
 		if err := c.gh.CreateSubIssue(bg, owner, name, parentNumber, childNumber); err != nil {
@@ -277,23 +292,44 @@ type taskSpec struct {
 	Description string `json:"description"`
 }
 
-func parseTasks(content string) ([]taskSpec, error) {
+type prGroupSpec struct {
+	Title       string      `json:"title"`
+	Description string      `json:"description"`
+	Tasks       []taskSpec  `json:"tasks"`
+}
+
+type decompositionSpec struct {
+	PRGroups []prGroupSpec `json:"pr_groups"`
+}
+
+func parsePRGroups(content string) ([]prGroupSpec, error) {
 	content = strings.TrimSpace(content)
-	raw, err := jsonutil.ExtractOutermost([]byte(content), '[')
+	raw, err := jsonutil.ExtractOutermost([]byte(content), '{')
 	if err != nil {
-		return nil, fmt.Errorf("no JSON array found in response: %w", err)
+		return nil, fmt.Errorf("no JSON object found in response: %w", err)
 	}
-	var tasks []taskSpec
-	if err := json.Unmarshal(raw, &tasks); err != nil {
+	var spec decompositionSpec
+	if err := json.Unmarshal(raw, &spec); err != nil {
 		return nil, err
 	}
-	for i, t := range tasks {
-		if strings.TrimSpace(t.Title) == "" {
-			return nil, fmt.Errorf("task %d has empty title", i)
+	for i, g := range spec.PRGroups {
+		if strings.TrimSpace(g.Title) == "" {
+			return nil, fmt.Errorf("pr group %d has empty title", i)
 		}
-		if strings.TrimSpace(t.Description) == "" {
-			return nil, fmt.Errorf("task %d has empty description", i)
+		if strings.TrimSpace(g.Description) == "" {
+			return nil, fmt.Errorf("pr group %d has empty description", i)
+		}
+		if len(g.Tasks) == 0 {
+			return nil, fmt.Errorf("pr group %d has no tasks", i)
+		}
+		for j, t := range g.Tasks {
+			if strings.TrimSpace(t.Title) == "" {
+				return nil, fmt.Errorf("pr group %d task %d has empty title", i, j)
+			}
+			if strings.TrimSpace(t.Description) == "" {
+				return nil, fmt.Errorf("pr group %d task %d has empty description", i, j)
+			}
 		}
 	}
-	return tasks, nil
+	return spec.PRGroups, nil
 }

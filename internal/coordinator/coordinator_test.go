@@ -83,7 +83,7 @@ func TestCoordinator_CreateProblem_BracketsInStrings(t *testing.T) {
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
 		return &launcher.MockAgent{
-			Responses: []string{`[{"title":"a]b","description":"d1"},{"title":"c}d","description":"d2"}]`},
+			Responses: []string{`{"pr_groups":[{"title":"handle brackets","description":"deal with brackets","tasks":[{"title":"a]b","description":"d1"},{"title":"c}d","description":"d2"}]}]}`},
 		}, nil
 	}
 
@@ -113,7 +113,7 @@ func TestCoordinator_CreateProblem(t *testing.T) {
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
 		return &launcher.MockAgent{
-			Responses: []string{`[{"title":"add handler","description":"implement POST /api/tasks"},{"title":"add tests","description":"write unit tests"}]`},
+			Responses: []string{`{"pr_groups":[{"title":"add handler and tests","description":"implement handler and tests","tasks":[{"title":"add handler","description":"implement POST /api/tasks"},{"title":"add tests","description":"write unit tests"}]}]}`},
 		}, nil
 	}
 
@@ -146,7 +146,7 @@ func TestCoordinator_CreateProblem_AsyncSuccess(t *testing.T) {
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
 		return &launcher.MockAgent{
-			Responses: []string{`[{"title":"t1","description":"d1"}]`},
+			Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`},
 		}, nil
 	}
 
@@ -173,7 +173,7 @@ func TestCoordinator_CreateProblem_EmptyTasks(t *testing.T) {
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		return &launcher.MockAgent{Responses: []string{"[]"}}, nil
+		return &launcher.MockAgent{Responses: []string{`{"pr_groups":[]}`}}, nil
 	}
 
 	coord := New(s, ml, &repo.Registry{Root: t.TempDir()}, &mockGitHub{issues: make(map[string]int)}, "codex", time.Minute)
@@ -196,7 +196,7 @@ func TestCoordinator_CreateProblem_AsyncFailure(t *testing.T) {
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
 		return &launcher.MockAgent{
-			Responses: []string{`[{"title":"t1","description":"d1"}]`},
+			Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`},
 		}, nil
 	}
 
@@ -226,7 +226,7 @@ func TestCoordinator_CreateProblem_MarksFailedOnGitHubError(t *testing.T) {
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+		return &launcher.MockAgent{Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`}}, nil
 	}
 
 	gh := &mockGitHub{issues: make(map[string]int), failNextIssue: true}
@@ -262,7 +262,7 @@ func TestCoordinator_CreateProblem_MarksFailedOnUpdateAfterIssueCreation(t *test
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+		return &launcher.MockAgent{Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`}}, nil
 	}
 
 	gh := &mockGitHub{issues: make(map[string]int)}
@@ -282,7 +282,7 @@ func TestCoordinator_CreateProblem_LazyRegistration(t *testing.T) {
 	ctx := context.Background()
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+		return &launcher.MockAgent{Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`}}, nil
 	}
 
 	reg := &mockRepoRegistry{dir: t.TempDir()}
@@ -311,7 +311,7 @@ func TestCoordinator_CreateProblem_LazyRegistrationUsesConfiguredBranch(t *testi
 	ctx := context.Background()
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+		return &launcher.MockAgent{Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`}}, nil
 	}
 
 	reg := &mockRepoRegistry{dir: t.TempDir()}
@@ -333,9 +333,9 @@ func TestCoordinator_CreateProblem_LazyRegistrationUsesConfiguredBranch(t *testi
 	assert.Equal(t, r.ID, tasks[0].RepoID)
 }
 
-func TestCoordinator_CreateProblem_MarksFailedOnTaskUpdateAfterChildIssueCreation(t *testing.T) {
-	errUpdate := errors.New("update task failed")
-	s, err := store.New(":memory:", store.WithUpdateTaskError(errUpdate))
+func TestCoordinator_CreateProblem_MarksFailedOnGroupUpdateAfterChildIssueCreation(t *testing.T) {
+	errUpdate := errors.New("update pr group failed")
+	s, err := store.New(":memory:", store.WithUpdatePRGroupError(errUpdate))
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -345,7 +345,7 @@ func TestCoordinator_CreateProblem_MarksFailedOnTaskUpdateAfterChildIssueCreatio
 
 	ml := &launcher.MockLauncher{}
 	ml.OnLaunch = func(spec launcher.LaunchSpec) (*launcher.MockAgent, error) {
-		return &launcher.MockAgent{Responses: []string{`[{"title":"t1","description":"d1"}]`}}, nil
+		return &launcher.MockAgent{Responses: []string{`{"pr_groups":[{"title":"group one","description":"single group","tasks":[{"title":"t1","description":"d1"}]}]}`}}, nil
 	}
 
 	gh := &mockGitHub{issues: make(map[string]int)}

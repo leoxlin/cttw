@@ -19,8 +19,9 @@ type Store struct {
 	// test-only hooks; when non-nil the named method returns this error instead
 	// of executing. They are intended for tests that need to simulate persistence
 	// failures while keeping the database readable.
-	updateProblemErr func() error
-	updateTaskErr    error
+	updateProblemErr  func() error
+	updateTaskErr     error
+	updatePRGroupErr  error
 }
 
 // StoreOption configures a Store during construction.
@@ -43,6 +44,12 @@ func WithUpdateProblemErrorFunc(fn func() error) StoreOption {
 // It is intended for tests.
 func WithUpdateTaskError(err error) StoreOption {
 	return func(s *Store) { s.updateTaskErr = err }
+}
+
+// WithUpdatePRGroupError returns a StoreOption that makes UpdatePRGroup return err.
+// It is intended for tests.
+func WithUpdatePRGroupError(err error) StoreOption {
+	return func(s *Store) { s.updatePRGroupErr = err }
 }
 
 // New opens the SQLite database at dbPath and runs migrations.
@@ -158,6 +165,35 @@ var migrations = []migration{
 			);`,
 		},
 	},
+	{
+		version: 2,
+		name:    "pr_groups",
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS pr_groups (
+				id TEXT PRIMARY KEY,
+				problem_id TEXT NOT NULL REFERENCES problems(id),
+				repo_id TEXT NOT NULL REFERENCES repos(id),
+				title TEXT NOT NULL,
+				description TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL,
+				branch TEXT,
+				base_branch TEXT,
+				base_group_id TEXT REFERENCES pr_groups(id),
+				stack_order INTEGER NOT NULL,
+				pr_number INTEGER,
+				issue_number INTEGER,
+				output TEXT,
+				attempts INTEGER NOT NULL DEFAULT 0,
+				max_attempts INTEGER NOT NULL DEFAULT 3,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			);`,
+			`ALTER TABLE tasks ADD COLUMN pr_group_id TEXT REFERENCES pr_groups(id);`,
+			`ALTER TABLE tasks ADD COLUMN depends_on_task_id TEXT REFERENCES tasks(id);`,
+			`ALTER TABLE tasks ADD COLUMN group_order INTEGER NOT NULL DEFAULT 0;`,
+			`ALTER TABLE tasks ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0;`,
+		},
+	},
 }
 
 func migrate(db *sql.DB) error {
@@ -259,6 +295,9 @@ func (s *Store) DeleteRepo(ctx context.Context, id string) error {
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE repo_id = ?`, id); err != nil {
 		return fmt.Errorf("delete repo tasks: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pr_groups WHERE repo_id = ?`, id); err != nil {
+		return fmt.Errorf("delete repo pr groups: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM problems WHERE repo_id = ?`, id); err != nil {
 		return fmt.Errorf("delete repo problems: %w", err)
@@ -438,44 +477,163 @@ func scanProblem(s scanner) (*Problem, error) {
 	return p, nil
 }
 
-// Task represents a unit of work within a problem, mapping to one PR.
-type Task struct {
-	ID             string
-	ProblemID      string
-	RepoID         string
-	Title          string
-	Description    string
-	Status         string
-	AgentSessionID string
-	Branch         string
-	BaseBranch     string
-	PRNumber       int
-	IssueNumber    int
-	Output         string
-	Attempts       int
-	MaxAttempts    int
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+// PRGroup represents a feature-complete pull request within a problem.
+// It contains one or more tasks/commits and is part of a stack.
+type PRGroup struct {
+	ID              string
+	ProblemID       string
+	RepoID          string
+	Title           string
+	Description     string
+	Status          string
+	Branch          string
+	BaseBranch      string
+	BaseGroupID     string
+	StackOrder      int
+	PRNumber        int
+	IssueNumber     int
+	Output          string
+	Attempts        int
+	MaxAttempts     int
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
-// CreateTask inserts a new pending task and returns it.
-func (s *Store) CreateTask(ctx context.Context, problemID, repoID, title, description string) (*Task, error) {
+// CreatePRGroup inserts a new pending PR group and returns it.
+func (s *Store) CreatePRGroup(ctx context.Context, problemID, repoID, title, description string, stackOrder int) (*PRGroup, error) {
 	now := time.Now().UTC()
-	t := &Task{
+	g := &PRGroup{
 		ID:          uuid.New().String(),
 		ProblemID:   problemID,
 		RepoID:      repoID,
 		Title:       title,
 		Description: description,
 		Status:      "pending",
+		StackOrder:  stackOrder,
 		MaxAttempts: 3,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO tasks (id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.ProblemID, t.RepoID, t.Title, t.Description, t.Status, t.AgentSessionID, t.Branch, t.BaseBranch, t.PRNumber, t.IssueNumber, t.Output, t.Attempts, t.MaxAttempts, t.CreatedAt, t.UpdatedAt,
+		`INSERT INTO pr_groups (id, problem_id, repo_id, title, description, status, branch, base_branch, base_group_id, stack_order, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		g.ID, g.ProblemID, g.RepoID, g.Title, g.Description, g.Status, g.Branch, g.BaseBranch, g.BaseGroupID, g.StackOrder, g.PRNumber, g.IssueNumber, g.Output, g.Attempts, g.MaxAttempts, g.CreatedAt, g.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create pr group: %w", err)
+	}
+	return g, nil
+}
+
+// GetPRGroup retrieves a PR group by its ID.
+func (s *Store) GetPRGroup(ctx context.Context, id string) (*PRGroup, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, problem_id, repo_id, title, description, status, branch, base_branch, base_group_id, stack_order, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at FROM pr_groups WHERE id = ?`, id)
+	return scanPRGroup(row)
+}
+
+// ListPRGroupsByProblem returns all PR groups for a problem ordered by stack_order.
+func (s *Store) ListPRGroupsByProblem(ctx context.Context, problemID string) ([]PRGroup, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, problem_id, repo_id, title, description, status, branch, base_branch, base_group_id, stack_order, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at FROM pr_groups WHERE problem_id = ? ORDER BY stack_order`, problemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var groups []PRGroup
+	for rows.Next() {
+		g, err := scanPRGroup(rows)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, *g)
+	}
+	return groups, rows.Err()
+}
+
+// UpdatePRGroup persists changes to an existing PR group.
+func (s *Store) UpdatePRGroup(ctx context.Context, g *PRGroup) error {
+	if s.updatePRGroupErr != nil {
+		return s.updatePRGroupErr
+	}
+	g.UpdatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE pr_groups SET problem_id=?, repo_id=?, title=?, description=?, status=?, branch=?, base_branch=?, base_group_id=?, stack_order=?, pr_number=?, issue_number=?, output=?, attempts=?, max_attempts=?, updated_at=? WHERE id = ?`,
+		g.ProblemID, g.RepoID, g.Title, g.Description, g.Status, g.Branch, g.BaseBranch, g.BaseGroupID, g.StackOrder, g.PRNumber, g.IssueNumber, g.Output, g.Attempts, g.MaxAttempts, g.UpdatedAt, g.ID,
+	)
+	return err
+}
+
+func scanPRGroup(s scanner) (*PRGroup, error) {
+	g := &PRGroup{}
+	var pr, issue sql.NullInt64
+	var baseGroupID sql.NullString
+	err := s.Scan(&g.ID, &g.ProblemID, &g.RepoID, &g.Title, &g.Description, &g.Status, &g.Branch, &g.BaseBranch, &baseGroupID, &g.StackOrder, &pr, &issue, &g.Output, &g.Attempts, &g.MaxAttempts, &g.CreatedAt, &g.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if baseGroupID.Valid {
+		g.BaseGroupID = baseGroupID.String
+	}
+	if pr.Valid {
+		g.PRNumber = int(pr.Int64)
+	}
+	if issue.Valid {
+		g.IssueNumber = int(issue.Int64)
+	}
+	return g, nil
+}
+
+// Task represents a unit of work within a problem, mapping to one commit within a PR group.
+type Task struct {
+	ID                string
+	ProblemID         string
+	RepoID            string
+	PRGroupID         string
+	DependsOnTaskID   string
+	Title             string
+	Description       string
+	Status            string
+	AgentSessionID    string
+	Branch            string
+	BaseBranch        string
+	GroupOrder        int
+	Sequence          int
+	PRNumber          int
+	IssueNumber       int
+	Output            string
+	Attempts          int
+	MaxAttempts       int
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// CreateTask inserts a new pending task and returns it.
+func (s *Store) CreateTask(ctx context.Context, problemID, repoID, title, description string) (*Task, error) {
+	return s.CreateTaskInGroup(ctx, problemID, repoID, "", title, description, 0, 0)
+}
+
+// CreateTaskInGroup inserts a new pending task inside a PR group and returns it.
+func (s *Store) CreateTaskInGroup(ctx context.Context, problemID, repoID, prGroupID, title, description string, groupOrder, sequence int) (*Task, error) {
+	now := time.Now().UTC()
+	t := &Task{
+		ID:          uuid.New().String(),
+		ProblemID:   problemID,
+		RepoID:      repoID,
+		PRGroupID:   prGroupID,
+		Title:       title,
+		Description: description,
+		Status:      "pending",
+		GroupOrder:  groupOrder,
+		Sequence:    sequence,
+		MaxAttempts: 3,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO tasks (id, problem_id, repo_id, pr_group_id, depends_on_task_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, group_order, sequence, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.ProblemID, t.RepoID, t.PRGroupID, t.DependsOnTaskID, t.Title, t.Description, t.Status, t.AgentSessionID, t.Branch, t.BaseBranch, t.PRNumber, t.IssueNumber, t.Output, t.Attempts, t.MaxAttempts, t.GroupOrder, t.Sequence, t.CreatedAt, t.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create task: %w", err)
@@ -486,7 +644,7 @@ func (s *Store) CreateTask(ctx context.Context, problemID, repoID, title, descri
 // GetTask retrieves a task by its ID.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at FROM tasks WHERE id = ?`, id)
+		`SELECT id, problem_id, repo_id, pr_group_id, depends_on_task_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, group_order, sequence, created_at, updated_at FROM tasks WHERE id = ?`, id)
 	return scanTask(row)
 }
 
@@ -497,16 +655,16 @@ func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
 	}
 	t.UpdatedAt = time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET problem_id=?, repo_id=?, title=?, description=?, status=?, agent_session_id=?, branch=?, base_branch=?, pr_number=?, issue_number=?, output=?, attempts=?, max_attempts=?, updated_at=? WHERE id = ?`,
-		t.ProblemID, t.RepoID, t.Title, t.Description, t.Status, t.AgentSessionID, t.Branch, t.BaseBranch, t.PRNumber, t.IssueNumber, t.Output, t.Attempts, t.MaxAttempts, t.UpdatedAt, t.ID,
+		`UPDATE tasks SET problem_id=?, repo_id=?, pr_group_id=?, depends_on_task_id=?, title=?, description=?, status=?, agent_session_id=?, branch=?, base_branch=?, pr_number=?, issue_number=?, output=?, attempts=?, max_attempts=?, group_order=?, sequence=?, updated_at=? WHERE id = ?`,
+		t.ProblemID, t.RepoID, t.PRGroupID, t.DependsOnTaskID, t.Title, t.Description, t.Status, t.AgentSessionID, t.Branch, t.BaseBranch, t.PRNumber, t.IssueNumber, t.Output, t.Attempts, t.MaxAttempts, t.GroupOrder, t.Sequence, t.UpdatedAt, t.ID,
 	)
 	return err
 }
 
-// ListTasksByProblem returns all tasks for a problem ordered by creation time.
+// ListTasksByProblem returns all tasks for a problem ordered by sequence.
 func (s *Store) ListTasksByProblem(ctx context.Context, problemID string) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at FROM tasks WHERE problem_id = ? ORDER BY created_at`, problemID)
+		`SELECT id, problem_id, repo_id, pr_group_id, depends_on_task_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, group_order, sequence, created_at, updated_at FROM tasks WHERE problem_id = ? ORDER BY sequence, created_at`, problemID)
 	if err != nil {
 		return nil, err
 	}
@@ -522,16 +680,22 @@ func (s *Store) ListTasksByProblem(ctx context.Context, problemID string) ([]Tas
 	return tasks, rows.Err()
 }
 
-// NextPendingTask selects the oldest pending task whose attempts are below max,
-// atomically marks it as running, and returns it.
+// NextPendingTask selects the pending task with the lowest sequence whose earlier
+// sequence tasks are all completed, atomically marks it running, and returns it.
 func (s *Store) NextPendingTask(ctx context.Context) (*Task, error) {
 	row := s.db.QueryRowContext(ctx,
 		`WITH next AS (
-			SELECT id FROM tasks WHERE status = 'pending' AND attempts < max_attempts ORDER BY created_at LIMIT 1
+			SELECT t.id FROM tasks t
+			WHERE t.status = 'pending' AND t.attempts < t.max_attempts
+			  AND NOT EXISTS (
+				  SELECT 1 FROM tasks blocker
+				  WHERE blocker.sequence < t.sequence AND blocker.status != 'completed'
+			  )
+			ORDER BY t.sequence LIMIT 1
 		)
 		UPDATE tasks SET status = 'running', updated_at = ?
 		WHERE id = (SELECT id FROM next) AND status = 'pending'
-		RETURNING id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at`,
+		RETURNING id, problem_id, repo_id, pr_group_id, depends_on_task_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, group_order, sequence, created_at, updated_at`,
 		time.Now().UTC())
 	t, err := scanTask(row)
 	if err == sql.ErrNoRows {
@@ -543,18 +707,22 @@ func (s *Store) NextPendingTask(ctx context.Context) (*Task, error) {
 	return t, nil
 }
 
-// NextPendingTaskForRepo selects the oldest pending task for a specific repo,
-// atomically marks it as running, and returns it.
+// NextPendingTaskForRepo selects the next pending task for a specific repo,
+// respecting serial dependency order, atomically marks it running, and returns it.
 func (s *Store) NextPendingTaskForRepo(ctx context.Context, repoID string) (*Task, error) {
 	row := s.db.QueryRowContext(ctx,
 		`WITH next AS (
-			SELECT id FROM tasks
-			WHERE status = 'pending' AND attempts < max_attempts AND repo_id = ?
-			ORDER BY created_at LIMIT 1
+			SELECT t.id FROM tasks t
+			WHERE t.status = 'pending' AND t.attempts < t.max_attempts AND t.repo_id = ?
+			  AND NOT EXISTS (
+				  SELECT 1 FROM tasks blocker
+				  WHERE blocker.sequence < t.sequence AND blocker.status != 'completed'
+			  )
+			ORDER BY t.sequence LIMIT 1
 		)
 		UPDATE tasks SET status = 'running', updated_at = ?
 		WHERE id = (SELECT id FROM next) AND status = 'pending'
-		RETURNING id, problem_id, repo_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, created_at, updated_at`,
+		RETURNING id, problem_id, repo_id, pr_group_id, depends_on_task_id, title, description, status, agent_session_id, branch, base_branch, pr_number, issue_number, output, attempts, max_attempts, group_order, sequence, created_at, updated_at`,
 		repoID, time.Now().UTC())
 	t, err := scanTask(row)
 	if err == sql.ErrNoRows {
@@ -574,12 +742,41 @@ func (s *Store) ResetRunningTasks(ctx context.Context) error {
 	return err
 }
 
+// CountIncompleteTasksByPRGroup returns the number of tasks in a group that are not completed.
+func (s *Store) CountIncompleteTasksByPRGroup(ctx context.Context, prGroupID string) (int, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tasks WHERE pr_group_id = ? AND status != 'completed'`, prGroupID)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// CountIncompleteTasksByProblem returns the number of tasks in a problem that are not completed.
+func (s *Store) CountIncompleteTasksByProblem(ctx context.Context, problemID string) (int, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tasks WHERE problem_id = ? AND status != 'completed'`, problemID)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 func scanTask(s scanner) (*Task, error) {
 	t := &Task{}
 	var pr, issue sql.NullInt64
-	err := s.Scan(&t.ID, &t.ProblemID, &t.RepoID, &t.Title, &t.Description, &t.Status, &t.AgentSessionID, &t.Branch, &t.BaseBranch, &pr, &issue, &t.Output, &t.Attempts, &t.MaxAttempts, &t.CreatedAt, &t.UpdatedAt)
+	var prGroupID, dependsOnID sql.NullString
+	err := s.Scan(&t.ID, &t.ProblemID, &t.RepoID, &prGroupID, &dependsOnID, &t.Title, &t.Description, &t.Status, &t.AgentSessionID, &t.Branch, &t.BaseBranch, &pr, &issue, &t.Output, &t.Attempts, &t.MaxAttempts, &t.GroupOrder, &t.Sequence, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if prGroupID.Valid {
+		t.PRGroupID = prGroupID.String
+	}
+	if dependsOnID.Valid {
+		t.DependsOnTaskID = dependsOnID.String
 	}
 	if pr.Valid {
 		t.PRNumber = int(pr.Int64)

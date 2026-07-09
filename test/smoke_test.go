@@ -20,6 +20,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type noopStackRunner struct{}
+
+func (n *noopStackRunner) StackInit(base string, branches []string) error { return nil }
+func (n *noopStackRunner) StackSubmit(auto, open bool) error              { return nil }
+
 type smokeGH struct {
 	issueCount int
 	prHead     string
@@ -72,7 +77,8 @@ func TestIntegration_FakeACPAgent(t *testing.T) {
 	ln := launcher.NewCodexLauncher(cfg)
 	gh := &smokeGH{}
 	coord := coordinator.New(s, ln, reg, gh, "codex", time.Minute)
-	w := worker.New(s, ln, reg, gh, "codex", time.Minute)
+	w := worker.New(s, ln, reg, gh, "codex", time.Minute,
+		worker.WithStackRunnerFactory(func(dir string) worker.StackRunner { return &noopStackRunner{} }))
 
 	problem, err := coord.CreateProblem(ctx, "o", "r", "add smoke test")
 	require.NoError(t, err)
@@ -95,10 +101,12 @@ func TestIntegration_FakeACPAgent(t *testing.T) {
 	completed, err := s.GetTask(ctx, tasks[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, "completed", completed.Status)
-	assert.Equal(t, 1, completed.PRNumber)
-	assert.NotEmpty(t, completed.Branch)
-	assert.Equal(t, completed.Branch, gh.prHead)
 	assert.FileExists(t, filepath.Join(repoDir, "smoke.txt"))
+
+	groups, err := s.ListPRGroupsByProblem(ctx, problem.ID)
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+	assert.NotEmpty(t, groups[0].Branch)
 }
 
 func initSmokeGitRepo(t *testing.T, dir string) string {
@@ -167,7 +175,7 @@ func main() {
 			call++
 			_ = os.WriteFile(counterPath, []byte(fmt.Sprintf("%d", call)), 0644)
 			if call == 1 {
-				res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"stopReason\":\"end_turn\",\"content\":\"[{\\\"title\\\":\\\"add test\\\",\\\"description\\\":\\\"add a smoke test\\\"}]\"}`" + `)})
+				res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"stopReason\":\"end_turn\",\"content\":\"{\\\"pr_groups\\\":[{\\\"title\\\":\\\"add smoke test\\\",\\\"description\\\":\\\"add a smoke test\\\",\\\"tasks\\\":[{\\\"title\\\":\\\"add test\\\",\\\"description\\\":\\\"add a smoke test\\\"}]}]}\"}`" + `)})
 			} else {
 				_ = os.WriteFile(` + fmt.Sprintf("%q", filepath.Join(repoDir, "smoke.txt")) + `, []byte("smoke\n"), 0644)
 				res, _ = json.Marshal(env{JSONRPC: "2.0", ID: e.ID, Result: json.RawMessage(` + "`{\"stopReason\":\"end_turn\",\"content\":\"{\\\"status\\\":\\\"completed\\\",\\\"summary\\\":\\\"added smoke file\\\",\\\"key_changes_made\\\":[\\\"smoke file\\\"],\\\"key_learnings\\\":[],\\\"verification\\\":[\\\"fake smoke verification\\\"]}\"}`" + `)})
